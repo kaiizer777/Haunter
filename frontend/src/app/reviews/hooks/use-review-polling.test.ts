@@ -67,4 +67,45 @@ describe("useReviewPolling hook", () => {
 
     expect(onRefresh).toHaveBeenCalledTimes(2);
   });
+
+  it("resets in-flight status in finally block even if cancelled mid-refresh", async () => {
+    let resolveRefresh!: () => void;
+    const slowRefresh = vi.fn().mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveRefresh = resolve;
+        })
+    );
+    const reviews = [mockReview("pending")];
+
+    const { unmount } = renderHook(() =>
+      useReviewPolling({ reviews, onRefresh: slowRefresh, intervalMs: 1000 })
+    );
+
+    // Trigger poll tick
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(slowRefresh).toHaveBeenCalledTimes(1);
+
+    // Unmount while refresh is still in flight (isCancelled becomes true)
+    unmount();
+
+    // Now resolve the in-flight promise
+    await act(async () => {
+      resolveRefresh();
+    });
+
+    // Remount or mount new instance with pending reviews
+    const nextRefresh = vi.fn().mockResolvedValue(undefined);
+    renderHook(() =>
+      useReviewPolling({ reviews, onRefresh: nextRefresh, intervalMs: 1000 })
+    );
+
+    // Advance timer: nextRefresh should execute because inFlightRef was reset to false
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    expect(nextRefresh).toHaveBeenCalledTimes(1);
+  });
 });

@@ -4,7 +4,9 @@ import {
   useAssociatedPr,
   useIsPrAssociated,
   clearAssociatedPrCache,
+  refreshAssociatedPrs,
   associatedPrCache,
+  associatedPrInflight,
 } from "./use-associated-prs";
 import { api } from "@/lib/api";
 import type { CodeReviewOut } from "../types";
@@ -68,5 +70,68 @@ describe("useAssociatedPr hook", () => {
     const directPrReview = mockReview({ pr_number: 101 });
     const { result: directResult } = renderHook(() => useIsPrAssociated(directPrReview));
     expect(directResult.current).toBe(true);
+  });
+
+  it("directly caches null for omitted review IDs without individual GET fan-out", async () => {
+    const review = mockReview({ id: "rev-omitted-1", commit_sha: "sha-omitted", pr_number: null });
+    const getAssociatedPrSpy = vi.spyOn(api, "getAssociatedPr");
+    const getBatchSpy = vi.spyOn(api, "getAssociatedPrsBatch").mockResolvedValueOnce({
+      items: [], // review ID is omitted from batch
+    });
+
+    const { result } = renderHook(() => useAssociatedPr(review));
+
+    await waitFor(() => {
+      expect(getBatchSpy).toHaveBeenCalledWith(["rev-omitted-1"]);
+    });
+
+    // Wait microtask flush
+    await waitFor(() => {
+      expect(associatedPrCache.has("rev-omitted-1")).toBe(true);
+    });
+
+    expect(associatedPrCache.get("rev-omitted-1")).toBeNull();
+    expect(result.current).toBeNull();
+    // Crucial: no individual GET calls fired
+    expect(getAssociatedPrSpy).not.toHaveBeenCalled();
+  });
+
+  it("bumps generation during refreshAssociatedPrs so late response from prior run does not poison cache", async () => {
+    let resolveBatch!: (value: any) => void;
+    const batchPromise = new Promise((resolve) => {
+      resolveBatch = resolve;
+    });
+
+    vi.spyOn(api, "getAssociatedPrsBatch").mockImplementation(() => batchPromise as any);
+
+    const review = mockReview({ id: "rev-late-1", commit_sha: "sha-late", pr_number: null });
+    renderHook(() => useAssociatedPr(review));
+
+    // Wait until in flight
+    await waitFor(() => {
+      expect(associatedPrInflight.has("rev-late-1")).toBe(true);
+    });
+
+    // Invalidate / refresh: bumps generation for in-flight keys before clearing
+    refreshAssociatedPrs();
+
+    // Now resolve late batch response
+    resolveBatch({
+      items: [
+        {
+          review_id: "rev-late-1",
+          associated_pr: {
+            number: 777,
+            url: "https://github.com/org/repo/pull/777",
+            title: "Late PR",
+          },
+        },
+      ],
+    });
+
+    await batchPromise;
+
+    // The late response must NOT have poisoned the cache because its generation was invalidated
+    expect(associatedPrCache.get("rev-late-1")).toBeUndefined();
   });
 });

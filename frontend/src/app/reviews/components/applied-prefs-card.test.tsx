@@ -53,6 +53,26 @@ describe("AppliedPrefsCard component", () => {
     expect(screen.getByText("Balanced")).toBeInTheDocument();
   });
 
+  it("supports backend enums high and low for strictness mapping", () => {
+    const { rerender } = render(
+      <AppliedPrefsCard
+        appliedPrefs={{
+          prefs: { review_strictness: "high" },
+        }}
+      />
+    );
+    expect(screen.getByText("Strict")).toBeInTheDocument();
+
+    rerender(
+      <AppliedPrefsCard
+        appliedPrefs={{
+          prefs: { review_strictness: "low" },
+        }}
+      />
+    );
+    expect(screen.getByText("Lenient")).toBeInTheDocument();
+  });
+
   it("expands and collapses checklist and guidelines text", () => {
     render(
       <AppliedPrefsCard

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CodeReviewOut } from "../types";
 
 export interface UseReviewPollingOptions {
@@ -39,7 +39,7 @@ export function useReviewPolling({
 }: UseReviewPollingOptions): UseReviewPollingResult {
   const [isLiveSyncing, setIsLiveSyncing] = useState(false);
   const onRefreshRef = useRef(onRefresh);
-  useEffect(() => {
+  useLayoutEffect(() => {
     onRefreshRef.current = onRefresh;
   }, [onRefresh]);
 
@@ -72,8 +72,8 @@ export function useReviewPolling({
       } catch {
         // Polling errors are silent in the background
       } finally {
+        inFlightRef.current = false;
         if (!isCancelled) {
-          inFlightRef.current = false;
           setIsLiveSyncing(false);
         }
       }

@@ -18,12 +18,10 @@ describe("DiffViewer component", () => {
     expect(screen.getByText("+const retry = true;")).toBeInTheDocument();
     expect(screen.getByText("+const maxRetries = 3;")).toBeInTheDocument();
 
-    // Check line numbers 1 to 5
-    expect(screen.getByText("1")).toBeInTheDocument();
-    expect(screen.getByText("2")).toBeInTheDocument();
-    expect(screen.getByText("3")).toBeInTheDocument();
-    expect(screen.getByText("4")).toBeInTheDocument();
-    expect(screen.getByText("5")).toBeInTheDocument();
+    // Check actual file line numbers starting from hunk header (10, 11, 12)
+    expect(screen.getByText("10")).toBeInTheDocument();
+    expect(screen.getAllByText("11")).toHaveLength(2);
+    expect(screen.getByText("12")).toBeInTheDocument();
 
     // Line styles: chunk header has cyan classes
     const chunkLine = container.querySelector(".border-cyan-500");
@@ -59,7 +57,25 @@ describe("DiffViewer component", () => {
     render(<DiffViewer patch={samplePatch} showLineNumbers={false} />);
 
     expect(screen.getByText("-const retry = false;")).toBeInTheDocument();
-    expect(screen.queryByText("1")).not.toBeInTheDocument();
+    expect(screen.queryByText("10")).not.toBeInTheDocument();
+  });
+
+  it("formats replacement snippets cleanly and strips markdown code fences", () => {
+    const fencedSnippet = "```ts\nconst token = authHeader.split(' ')[1];\nreturn verifyToken(token);\n```";
+    render(<DiffViewer patch={fencedSnippet} />);
+
+    expect(
+      screen.getByText("const token = authHeader.split(' ')[1];")
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("return verifyToken(token);")
+    ).toBeInTheDocument();
+    // Fences stripped
+    expect(screen.queryByText("```ts")).not.toBeInTheDocument();
+
+    // Default line numbers start at 1, 2 for plain replacement snippets
+    expect(screen.getByText("1")).toBeInTheDocument();
+    expect(screen.getByText("2")).toBeInTheDocument();
   });
 
   it("handles empty or blank patch gracefully", () => {

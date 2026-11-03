@@ -43,9 +43,12 @@ const prRequestGeneration = new Map<string, number>();
 /**
  * Drop every cached + in-flight associated-PR entry. Only the test reset
  * uses the full clear (suite isolation); product paths use
- * clearFailedAssociatedPrCache below so resolved PRs survive a Refresh.
+ * refreshAssociatedPrs below so resolved PRs survive a Refresh.
  */
 export function clearAssociatedPrCache(): void {
+  for (const key of associatedPrInflight.keys()) {
+    prRequestGeneration.set(key, ++currentGeneration);
+  }
   associatedPrCache.clear();
   associatedPrInflight.clear();
   prRequestGeneration.clear();
@@ -58,18 +61,26 @@ export function clearAssociatedPrCache(): void {
  * list Refresh and detail Retry paths: null misses genuinely retry on the
  * fresh rows' batch fetch, while success entries are kept so resolved
  * `PR #n` pills never refetch.
+ *
+ * Bumps generation for all keys in `associatedPrInflight` before clearing so late
+ * responses from prior runs cannot poison refreshed cache entries.
  */
-export function clearFailedAssociatedPrCache(): void {
+export function refreshAssociatedPrs(): void {
   for (const [key, value] of associatedPrCache) {
     if (value == null) {
       associatedPrCache.delete(key);
       prRequestGeneration.delete(key);
     }
   }
+  for (const key of associatedPrInflight.keys()) {
+    prRequestGeneration.set(key, ++currentGeneration);
+  }
   associatedPrInflight.clear();
   batchQueue = [];
   batchScheduled = false;
 }
+
+export const clearFailedAssociatedPrCache = refreshAssociatedPrs;
 
 /** Test-only reset for the module-level associated-PR cache (vitest). */
 export function __resetAssociatedPrCacheForTests(): void {
@@ -112,7 +123,8 @@ async function flushBatchPrLookups(): Promise<void> {
   }
 
   for (const item of queue) {
-    if (batchMap.has(item.id)) {
+    if (hasBatchFn) {
+      // Directly set null for omitted IDs to eliminate N network fan-out
       const pr = batchMap.get(item.id) ?? null;
       if (prRequestGeneration.get(item.id) === item.generation) {
         associatedPrCache.set(item.id, pr);

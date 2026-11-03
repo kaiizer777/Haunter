@@ -15,6 +15,8 @@ export interface DiffViewerProps {
   showLineNumbers?: boolean;
 }
 
+const HUNK_REGEX = /@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
+
 /**
  * Parses simple additions and deletions count from a unified diff patch string.
  */
@@ -22,6 +24,94 @@ function getPatchStats(patch: string) {
   const additions = (patch.match(/^\+[^+]/gm) || []).length;
   const deletions = (patch.match(/^-[^-]/gm) || []).length;
   return { additions, deletions };
+}
+
+/**
+ * Clean replacement snippets or patches, stripping enclosing markdown code fences.
+ */
+function cleanPatchString(raw: string): string {
+  if (!raw) return "";
+  let cleaned = raw.replace(/\r\n/g, "\n").trim();
+  // Strip outer markdown code blocks if present: ```diff ... ``` or ```python ... ``` or ```suggestion ... ```
+  const fenceMatch = cleaned.match(/^```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```$/);
+  if (fenceMatch) {
+    cleaned = fenceMatch[1].trim();
+  }
+  return cleaned;
+}
+
+interface FormattedLine {
+  raw: string;
+  lineStyle: string;
+  lineNumber: string;
+}
+
+function parseDiffLines(patch: string): FormattedLine[] {
+  const lines = patch.split("\n");
+  let currentOldLine = 0;
+  let currentNewLine = 0;
+  let inHunk = false;
+
+  return lines.map((line, idx) => {
+    const hunkMatch = line.match(HUNK_REGEX);
+    if (hunkMatch) {
+      currentOldLine = parseInt(hunkMatch[1], 10);
+      currentNewLine = parseInt(hunkMatch[2], 10);
+      inHunk = true;
+      return {
+        raw: line,
+        lineStyle:
+          "text-cyan-400 bg-cyan-950/25 px-3 py-0.5 border-l-2 border-cyan-500 font-semibold",
+        lineNumber: "",
+      };
+    }
+
+    if (line.startsWith("---") || line.startsWith("+++")) {
+      return {
+        raw: line,
+        lineStyle:
+          "text-zinc-400 bg-zinc-900/40 px-3 py-0.5 border-l-2 border-zinc-600 font-medium",
+        lineNumber: "",
+      };
+    }
+
+    if (line.startsWith("+")) {
+      const num = inHunk ? currentNewLine++ : idx + 1;
+      return {
+        raw: line,
+        lineStyle:
+          "bg-emerald-950/40 text-emerald-300 border-l-2 border-emerald-500 px-3 py-0.5",
+        lineNumber: String(num),
+      };
+    }
+
+    if (line.startsWith("-")) {
+      const num = inHunk ? currentOldLine++ : idx + 1;
+      return {
+        raw: line,
+        lineStyle:
+          "bg-rose-950/40 text-rose-300 border-l-2 border-rose-500 px-3 py-0.5",
+        lineNumber: String(num),
+      };
+    }
+
+    // Context line or normal snippet line
+    let numStr = "";
+    if (inHunk) {
+      numStr = String(currentNewLine);
+      currentOldLine++;
+      currentNewLine++;
+    } else {
+      numStr = String(idx + 1);
+    }
+
+    return {
+      raw: line,
+      lineStyle:
+        "text-zinc-300 px-3 py-0.5 border-l-2 border-transparent hover:bg-zinc-900/30",
+      lineNumber: numStr,
+    };
+  });
 }
 
 /**
@@ -37,7 +127,8 @@ export function DiffViewer({
   maxHeight,
   showLineNumbers = true,
 }: DiffViewerProps) {
-  if (!patch || patch.trim().length === 0) {
+  const cleanedPatch = cleanPatchString(patch);
+  if (!cleanedPatch || cleanedPatch.length === 0) {
     return (
       <div
         className={cn(
@@ -50,8 +141,8 @@ export function DiffViewer({
     );
   }
 
-  const lines = patch.trim().split("\n");
-  const stats = getPatchStats(patch);
+  const lines = parseDiffLines(cleanedPatch);
+  const stats = getPatchStats(cleanedPatch);
 
   return (
     <div
@@ -98,38 +189,22 @@ export function DiffViewer({
         className="overflow-x-auto text-[11px] font-mono leading-relaxed select-text"
         style={maxHeight ? { maxHeight, overflowY: "auto" } : undefined}
       >
-        {lines.map((line, idx) => {
-          let lineStyle =
-            "text-zinc-300 px-3 py-0.5 border-l-2 border-transparent hover:bg-zinc-900/30";
-
-          if (line.startsWith("@@")) {
-            lineStyle =
-              "text-cyan-400 bg-cyan-950/25 px-3 py-0.5 border-l-2 border-cyan-500 font-semibold";
-          } else if (line.startsWith("+")) {
-            lineStyle =
-              "bg-emerald-950/40 text-emerald-300 border-l-2 border-emerald-500 px-3 py-0.5";
-          } else if (line.startsWith("-")) {
-            lineStyle =
-              "bg-rose-950/40 text-rose-300 border-l-2 border-rose-500 px-3 py-0.5";
-          }
-
-          return (
-            <div
-              key={idx}
-              className={cn(
-                "flex items-start min-w-full font-mono whitespace-pre transition-colors",
-                lineStyle
-              )}
-            >
-              {showLineNumbers && (
-                <span className="select-none text-zinc-600 mr-2.5 w-7 text-right text-[10px] inline-block shrink-0 pt-px font-mono">
-                  {idx + 1}
-                </span>
-              )}
-              <span className="flex-1 font-mono tracking-tight">{line}</span>
-            </div>
-          );
-        })}
+        {lines.map((line, idx) => (
+          <div
+            key={idx}
+            className={cn(
+              "flex items-start min-w-full font-mono whitespace-pre transition-colors",
+              line.lineStyle
+            )}
+          >
+            {showLineNumbers && (
+              <span className="select-none text-zinc-600 mr-2.5 w-7 text-right text-[10px] inline-block shrink-0 pt-px font-mono">
+                {line.lineNumber || "\u00A0"}
+              </span>
+            )}
+            <span className="flex-1 font-mono tracking-tight">{line.raw || " "}</span>
+          </div>
+        ))}
       </div>
     </div>
   );

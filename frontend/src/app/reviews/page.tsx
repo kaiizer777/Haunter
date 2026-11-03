@@ -38,6 +38,7 @@ import { useReviewPolling } from "./hooks/use-review-polling";
 import {
   clearAssociatedPrCache,
   clearFailedAssociatedPrCache,
+  refreshAssociatedPrs,
   __resetAssociatedPrCacheForTests,
 } from "./hooks/use-associated-prs";
 
@@ -56,6 +57,7 @@ import {
 export {
   clearAssociatedPrCache,
   clearFailedAssociatedPrCache,
+  refreshAssociatedPrs,
   __resetAssociatedPrCacheForTests,
 };
 

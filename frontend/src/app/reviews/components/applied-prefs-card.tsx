@@ -27,6 +27,7 @@ export interface AppliedPrefsCardProps {
 function getStrictnessBadge(strictness?: string | null) {
   const norm = (strictness ?? "").toLowerCase().trim();
   switch (norm) {
+    case "high":
     case "strict":
       return {
         label: "Strict",
@@ -34,6 +35,7 @@ function getStrictnessBadge(strictness?: string | null) {
           "border-rose-500/40 bg-rose-950/50 text-rose-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
         description: "Enforces zero tolerance on security & architecture bugs",
       };
+    case "low":
     case "lenient":
       return {
         label: "Lenient",
