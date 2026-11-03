@@ -70,6 +70,61 @@ export interface TriageChipsProps {
 }
 
 /**
+ * Computes the lead sentence for the triage summary strip.
+ */
+export function getLeadSentence(counts: Record<OutcomeKey, number>): React.ReactNode {
+  const actionable = (counts.changes_requested ?? 0) + (counts.advisory ?? 0);
+  if (actionable > 0) {
+    return (
+      <>
+        <span className="font-semibold text-zinc-100">{actionable}</span>{" "}
+        {actionable === 1 ? "review needs" : "reviews need"} a decision before merge
+        {(counts.failed ?? 0) > 0 && (
+          <>
+            {" · "}
+            <span className="font-semibold text-rose-300">{counts.failed}</span>{" "}
+            failed to analyse
+          </>
+        )}
+      </>
+    );
+  }
+
+  if ((counts.in_progress ?? 0) > 0) {
+    return (
+      <>
+        <span className="font-semibold text-zinc-100">{counts.in_progress}</span>{" "}
+        {counts.in_progress === 1 ? "analysis is" : "analyses are"} still running
+        {(counts.failed ?? 0) > 0 && (
+          <>
+            {" ("}
+            <span className="font-semibold text-rose-300">{counts.failed}</span>{" "}
+            {counts.failed === 1
+              ? "failed analysis requires inspection"
+              : "failed analyses require inspection"}
+            {")"}
+          </>
+        )}
+      </>
+    );
+  }
+
+  if ((counts.failed ?? 0) > 0) {
+    return (
+      <>
+        <span className="font-semibold text-rose-300">{counts.failed}</span>{" "}
+        {counts.failed === 1
+          ? "failed analysis requires"
+          : "failed analyses require"}{" "}
+        retry or inspection
+      </>
+    );
+  }
+
+  return <>Nothing needs a decision right now</>;
+}
+
+/**
  * Triage outcome strip and summary.
  *
  * Provides a high-density orientation strip showing actionable merge decisions
@@ -82,7 +137,6 @@ export function TriageChips({
   className,
 }: TriageChipsProps) {
   const total = Object.values(counts).reduce((sum, n) => sum + n, 0);
-  const actionable = (counts.changes_requested ?? 0) + (counts.advisory ?? 0);
 
   return (
     <section
@@ -94,43 +148,11 @@ export function TriageChips({
     >
       <div className="flex flex-wrap items-center gap-3">
         {/* Lead sentence — the triage verdict in words */}
-        <p className="mr-1 text-xs text-zinc-300">
-          {actionable > 0 ? (
-            <>
-              <span className="font-semibold text-zinc-100">{actionable}</span>{" "}
-              {actionable === 1 ? "review needs" : "reviews need"} a decision
-              before merge
-              {(counts.failed ?? 0) > 0 && (
-                <>
-                  {" · "}
-                  <span className="font-semibold text-rose-300">
-                    {counts.failed}
-                  </span>{" "}
-                  failed to analyse
-                </>
-              )}
-            </>
-          ) : (counts.in_progress ?? 0) > 0 ? (
-            <>
-              <span className="font-semibold text-zinc-100">
-                {counts.in_progress}
-              </span>{" "}
-              {counts.in_progress === 1 ? "analysis is" : "analyses are"} still
-              running
-            </>
-          ) : (counts.failed ?? 0) > 0 ? (
-            <>
-              <span className="font-semibold text-rose-300">
-                {counts.failed}
-              </span>{" "}
-              {counts.failed === 1
-                ? "failed analysis requires"
-                : "failed analyses require"}{" "}
-              retry or inspection
-            </>
-          ) : (
-            <>Nothing needs a decision right now</>
-          )}
+        <p
+          data-testid="triage-lead-sentence"
+          className="mr-1 text-xs text-zinc-300"
+        >
+          {getLeadSentence(counts)}
         </p>
 
         {/* Counter pills */}

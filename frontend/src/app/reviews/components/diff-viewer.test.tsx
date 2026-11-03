@@ -78,6 +78,39 @@ describe("DiffViewer component", () => {
     expect(screen.getByText("2")).toBeInTheDocument();
   });
 
+  it("preserves leading indentation on line 1 for replacement snippets", () => {
+    const indentedSnippet = "  const indented = true;\n  return indented;";
+    const { container } = render(<DiffViewer patch={indentedSnippet} />);
+
+    const lines = container.querySelectorAll(".tracking-tight");
+    expect(lines[0].textContent).toBe("  const indented = true;");
+    expect(lines[1].textContent).toBe("  return indented;");
+  });
+
+  it("distinguishes git file headers from code lines starting with +++ or ---", () => {
+    const patchWithCode = `--- a/src/counter.ts
++++ b/src/counter.ts
+@@ -1,4 +1,5 @@
+ const base = 10;
++---count;
+++++count;
++let next = 1;`;
+
+    const { container } = render(<DiffViewer patch={patchWithCode} />);
+
+    // File headers should be rendered with zinc styling and no line number
+    const headers = container.querySelectorAll(".border-zinc-600");
+    expect(headers).toHaveLength(2);
+    expect(screen.getByText("--- a/src/counter.ts")).toBeInTheDocument();
+    expect(screen.getByText("+++ b/src/counter.ts")).toBeInTheDocument();
+
+    // Changed code lines inside hunk starting with +++ or --- should be treated as code additions
+    const additionLines = container.querySelectorAll(".border-emerald-500");
+    expect(additionLines.length).toBeGreaterThanOrEqual(3);
+    expect(screen.getByText("+---count;")).toBeInTheDocument();
+    expect(screen.getByText("++++count;")).toBeInTheDocument();
+  });
+
   it("handles empty or blank patch gracefully", () => {
     render(<DiffViewer patch="   " />);
 

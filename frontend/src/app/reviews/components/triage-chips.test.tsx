@@ -1,6 +1,6 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { TriageChips } from "./triage-chips";
 import type { OutcomeKey } from "../review-triage";
 
@@ -150,9 +150,34 @@ describe("TriageChips component", () => {
       />
     );
 
+    const lead = screen.getByTestId("triage-lead-sentence");
     expect(
-      screen.getByText(/failed analyses require retry or inspection/i)
+      within(lead).getByText(/failed analyses require retry or inspection/i)
     ).toBeInTheDocument();
-    expect(screen.getAllByText("2").length).toBeGreaterThanOrEqual(1);
+    expect(within(lead).getByText("2")).toBeInTheDocument();
+  });
+
+  it("mentions both in-progress and failed analyses when actionable is 0", () => {
+    const counts: Record<OutcomeKey, number> = {
+      changes_requested: 0,
+      advisory: 0,
+      in_progress: 3,
+      failed: 1,
+      suppressed: 0,
+      clean: 0,
+    };
+
+    render(
+      <TriageChips
+        counts={counts}
+        activeOutcome={null}
+        onToggle={vi.fn()}
+      />
+    );
+
+    const lead = screen.getByTestId("triage-lead-sentence");
+    expect(lead).toHaveTextContent(
+      "3 analyses are still running (1 failed analysis requires inspection)"
+    );
   });
 });

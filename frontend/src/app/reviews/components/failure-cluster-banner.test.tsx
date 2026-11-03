@@ -64,11 +64,13 @@ describe("FailureClusterBanner component", () => {
     );
 
     await waitFor(() => {
-      expect(
-        screen.getByRole("button", {
-          name: /copied signature for all 9 free-tier models exhausted/i,
-        })
-      ).toBeInTheDocument();
+      const copiedBtn = screen.getByRole("button", {
+        name: /copied signature for all 9 free-tier models exhausted/i,
+      });
+      expect(copiedBtn).toBeInTheDocument();
+      const svg = copiedBtn.querySelector("svg");
+      expect(svg).toBeInTheDocument();
+      expect(svg).toHaveClass("text-emerald-400");
     });
   });
 

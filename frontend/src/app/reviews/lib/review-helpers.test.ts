@@ -16,6 +16,7 @@ import {
   toggleStagedFix,
   clearStagedFixes,
   computeFindingStableKey,
+  fnv1a32,
 } from "./review-helpers";
 import type { CodeReviewOut, ReviewFindingOut } from "../types";
 
@@ -224,14 +225,15 @@ describe("staged fix localStorage persistence", () => {
       critique: "Off-by-one error",
     };
 
+    const critiqueHash = fnv1a32(findingWithoutPatch.critique || "").toString(16);
     const key1 = computeFindingStableKey(findingWithoutPatch, "rev-123");
-    expect(key1).toBe("rev-123:logic:src/index.ts:14-20");
+    expect(key1).toBe(`rev-123:logic:src/index.ts:14-20:${critiqueHash}`);
 
     const key2 = computeFindingStableKey({
       ...findingWithoutPatch,
       symbol_name: "calculateTax",
     });
-    expect(key2).toBe("logic:src/index.ts:14-20:calculateTax");
+    expect(key2).toBe(`logic:src/index.ts:14-20:calculateTax:${critiqueHash}`);
 
     // Distinguishes findings when suggested patch differs
     const f1: ReviewFindingOut = {
@@ -244,5 +246,26 @@ describe("staged fix localStorage persistence", () => {
     };
     expect(computeFindingStableKey(f1)).not.toBe(computeFindingStableKey(f2));
     expect(computeFindingStableKey(f1)).not.toBe(computeFindingStableKey(findingWithoutPatch));
+
+    // Distinguishes findings at same file and lines without patches when critiques differ
+    const fNoPatchA: ReviewFindingOut = {
+      file_path: "src/index.ts",
+      line_start: 14,
+      line_end: 20,
+      category: "logic",
+      severity: "high",
+      critique: "First issue description",
+    };
+    const fNoPatchB: ReviewFindingOut = {
+      file_path: "src/index.ts",
+      line_start: 14,
+      line_end: 20,
+      category: "logic",
+      severity: "high",
+      critique: "Second distinct issue description",
+    };
+    expect(computeFindingStableKey(fNoPatchA)).not.toBe(
+      computeFindingStableKey(fNoPatchB)
+    );
   });
 });

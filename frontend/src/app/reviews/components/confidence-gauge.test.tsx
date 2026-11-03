@@ -23,13 +23,14 @@ describe("ConfidenceGauge component", () => {
   });
 
   it("renders moderate risk score with accurate accessible name and amber band", () => {
-    // Risk 45 -> (100 - 45) / 10 = 5.5 rounded = 6/10
-    render(<ConfidenceGauge riskScore={45} />);
+    // Risk 50 -> (100 - 50) / 10 = 5/10
+    render(<ConfidenceGauge riskScore={50} />);
 
     expect(
-      screen.getByRole("img", { name: "Confidence 6 of 10 — elevated risk" })
+      screen.getByRole("img", { name: "Confidence 5 of 10 — elevated risk" })
     ).toBeInTheDocument();
-    expect(screen.getByText("6")).toBeInTheDocument();
+    expect(screen.getByText("5")).toBeInTheDocument();
+    expect(screen.getByText("5")).toHaveClass("text-amber-400");
     expect(screen.getByText("ELEVATED")).toBeInTheDocument();
   });
 

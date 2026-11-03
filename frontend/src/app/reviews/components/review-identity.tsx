@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   GitPullRequest,
   GitCommit,
@@ -218,7 +218,16 @@ export function CommitShaBadge({
 }: CommitShaBadgeProps) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const shortSha = commitSha ? commitSha.substring(0, 7) : "unknown";
+
+  useEffect(() => {
+    return () => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    };
+  }, []);
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -226,12 +235,27 @@ export function CommitShaBadge({
     if (!commitSha) return;
     try {
       await navigator.clipboard.writeText(commitSha);
+      if (errorTimerRef.current) {
+        clearTimeout(errorTimerRef.current);
+        errorTimerRef.current = null;
+      }
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
+      }
       setCopied(true);
       setCopyFailed(false);
-      setTimeout(() => setCopied(false), 2000);
+      successTimerRef.current = setTimeout(() => setCopied(false), 2000);
     } catch {
+      if (successTimerRef.current) {
+        clearTimeout(successTimerRef.current);
+        successTimerRef.current = null;
+      }
+      if (errorTimerRef.current) {
+        clearTimeout(errorTimerRef.current);
+      }
+      setCopied(false);
       setCopyFailed(true);
-      setTimeout(() => setCopyFailed(false), 2000);
+      errorTimerRef.current = setTimeout(() => setCopyFailed(false), 2000);
     }
   };
 

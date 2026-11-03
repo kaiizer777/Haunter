@@ -13,7 +13,7 @@ export interface ConfidenceGaugeProps {
   showChip?: boolean;
   /** Optional custom container class name */
   className?: string;
-  /** Optional override for accessible name (preserves "Confidence X of 10" invariant by default) */
+  /** Optional override for accessible name (defaults to "Confidence X of 10 — <band> risk", or "Confidence — of 10" when neutral) */
   ariaLabel?: string;
 }
 
@@ -25,8 +25,8 @@ export interface ConfidenceGaugeProps {
  * risk 31-70 -> confidence 7-3/10 (amber)
  * risk 71-100 -> confidence 3-1/10 (rose)
  *
- * Invariant: Preserves exact accessible name `aria-label="Confidence X of 10"`
- * (or `aria-label="Confidence — of 10"` when unscored).
+ * Invariant: Accessible name defaults to `aria-label="Confidence X of 10 — <band> risk"`
+ * (or `aria-label="Confidence — of 10"` when unscored/neutral).
  */
 export function ConfidenceGauge({
   riskScore,

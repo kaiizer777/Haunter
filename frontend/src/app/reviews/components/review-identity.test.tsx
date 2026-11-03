@@ -185,6 +185,37 @@ describe("review-identity components", () => {
         expect(screen.getByRole("alert")).toHaveTextContent("Copy failed");
       });
     });
+
+    it("resets copied state immediately on subsequent clipboard failure and cleans up timers", async () => {
+      writeTextMock.mockResolvedValueOnce(undefined);
+      const { unmount } = render(
+        <CommitShaBadge
+          commitSha="8f4b238318b637ee91e6f27d41f32943"
+          repoOwner="acme"
+          repoName="sentinel"
+        />
+      );
+
+      const copyBtn = screen.getByRole("button", {
+        name: /Copy full commit SHA/i,
+      });
+      fireEvent.click(copyBtn);
+
+      await waitFor(() => {
+        expect(screen.getByRole("status")).toHaveTextContent("Copied SHA!");
+      });
+
+      // Subsequent failure should immediately clear copied
+      writeTextMock.mockRejectedValueOnce(new Error("Clipboard denied"));
+      fireEvent.click(copyBtn);
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert")).toHaveTextContent("Copy failed");
+        expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      });
+
+      unmount();
+    });
   });
 
   describe("BranchFlow", () => {

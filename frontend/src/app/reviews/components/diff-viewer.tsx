@@ -31,11 +31,11 @@ function getPatchStats(patch: string) {
  */
 function cleanPatchString(raw: string): string {
   if (!raw) return "";
-  let cleaned = raw.replace(/\r\n/g, "\n").trim();
+  let cleaned = raw.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\s+$/, "");
   // Strip outer markdown code blocks if present: ```diff ... ``` or ```python ... ``` or ```suggestion ... ```
   const fenceMatch = cleaned.match(/^```(?:[a-zA-Z0-9_-]+)?\n([\s\S]*?)\n```$/);
   if (fenceMatch) {
-    cleaned = fenceMatch[1].trim();
+    cleaned = fenceMatch[1].replace(/^\n+/, "").replace(/\s+$/, "");
   }
   return cleaned;
 }
@@ -66,7 +66,14 @@ function parseDiffLines(patch: string): FormattedLine[] {
       };
     }
 
-    if (line.startsWith("---") || line.startsWith("+++")) {
+    const isFileHeader =
+      !inHunk &&
+      (line.startsWith("--- a/") ||
+        line.startsWith("+++ b/") ||
+        line.startsWith("--- /dev/null") ||
+        line.startsWith("+++ /dev/null"));
+
+    if (isFileHeader) {
       return {
         raw: line,
         lineStyle:

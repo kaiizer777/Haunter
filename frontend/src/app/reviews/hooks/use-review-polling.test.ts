@@ -255,36 +255,36 @@ describe("useReviewPolling hook", () => {
           resolveRefresh = resolve;
         })
     );
-    const reviews = [mockReview("pending")];
+    const pendingReviews = [mockReview("pending")];
+    const terminalReviews = [mockReview("completed")];
 
-    const { unmount } = renderHook(() =>
-      useReviewPolling({ reviews, onRefresh: slowRefresh, intervalMs: 1000 })
+    const { rerender } = renderHook(
+      ({ reviews }) =>
+        useReviewPolling({ reviews, onRefresh: slowRefresh, intervalMs: 4500 }),
+      { initialProps: { reviews: pendingReviews } }
     );
 
-    // Trigger poll tick
+    // Advance timers so a tick fires (setting inFlightRef)
     await act(async () => {
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(4500);
     });
     expect(slowRefresh).toHaveBeenCalledTimes(1);
 
-    // Unmount while refresh is still in flight (isCancelled becomes true)
-    unmount();
+    // Rerender with terminal reviews (so active review list becomes empty)
+    rerender({ reviews: terminalReviews });
 
-    // Now resolve the in-flight promise
+    // Resolve the in-flight promise (which triggers the finally block resetting inFlightRef.current = false)
     await act(async () => {
       resolveRefresh();
     });
 
-    // Remount or mount new instance with pending reviews
-    const nextRefresh = vi.fn().mockResolvedValue(undefined);
-    renderHook(() =>
-      useReviewPolling({ reviews, onRefresh: nextRefresh, intervalMs: 1000 })
-    );
+    // Rerender with pending reviews again
+    rerender({ reviews: pendingReviews });
 
-    // Advance timer: nextRefresh should execute because inFlightRef was reset to false
+    // Advance timer by 4500ms and assert onRefresh is called again
     await act(async () => {
-      vi.advanceTimersByTime(1000);
+      vi.advanceTimersByTime(4500);
     });
-    expect(nextRefresh).toHaveBeenCalledTimes(1);
+    expect(slowRefresh).toHaveBeenCalledTimes(2);
   });
 });

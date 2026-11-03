@@ -204,6 +204,18 @@ export function blastRadiusSummary(review: CodeReviewOut): {
 }
 
 /**
+ * 32-bit FNV-1a non-cryptographic hash for stable string identity.
+ */
+export function fnv1a32(input: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < input.length; i++) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
+/**
  * Computes a deterministic, stable key for a review finding within a review.
  * Avoids index-based React keys when mapping findings across rerenders and lens filters.
  */
@@ -217,16 +229,12 @@ export function computeFindingStableKey(
   const end = finding.line_end ?? 0;
   const cat = finding.category || "finding";
   const sym = finding.symbol_name ? `:${finding.symbol_name}` : "";
+  const critiqueHash = `:${fnv1a32(finding.critique || "").toString(16)}`;
   let patchSuffix = "";
   if (finding.suggested_patch) {
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < finding.suggested_patch.length; i++) {
-      hash ^= finding.suggested_patch.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193) >>> 0;
-    }
-    patchSuffix = `:${hash.toString(16)}`;
+    patchSuffix = `:${fnv1a32(finding.suggested_patch).toString(16)}`;
   }
-  return `${prefix}${cat}:${path}:${start}-${end}${sym}${patchSuffix}`;
+  return `${prefix}${cat}:${path}:${start}-${end}${sym}${critiqueHash}${patchSuffix}`;
 }
 
 /**
@@ -243,11 +251,7 @@ export function stagedFixKey(
   scope: StagedFixScope = {}
 ): string {
   const patch = finding.suggested_patch ?? "";
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < patch.length; i++) {
-    hash ^= patch.charCodeAt(i);
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
+  const hash = fnv1a32(patch);
   const repo =
     scope.repoOwner && scope.repoName
       ? `${scope.repoOwner}/${scope.repoName}`
