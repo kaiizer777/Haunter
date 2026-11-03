@@ -4,6 +4,7 @@
  */
 
 import { RISK_CRITICAL, RISK_MODERATE } from "../review-triage";
+export { RISK_CRITICAL, RISK_MODERATE };
 import type { CodeReviewOut, ReviewFindingOut, StagedFixScope } from "../types";
 
 /**

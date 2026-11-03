@@ -156,12 +156,13 @@ function requestAssociatedPr(id: string): Promise<AssociatedPROut | null> {
 /**
  * Hook to retrieve the associated pull request for a given review.
  */
-export function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
+export function useAssociatedPr(review: Partial<CodeReviewOut>): AssociatedPROut | null {
   const [, setResolved] = useState<AssociatedPROut | null>(
-    () => associatedPrCache.get(review.id) ?? null
+    () => (review?.id ? associatedPrCache.get(review.id) ?? null : null)
   );
 
   useEffect(() => {
+    if (!review?.id) return;
     if (review.pr_number != null) return;
     const sha = review.commit_sha;
     if (!sha) return;
@@ -191,7 +192,7 @@ export function useAssociatedPr(review: CodeReviewOut): AssociatedPROut | null {
     };
   }, [review]);
 
-  if (review.pr_number != null) return null;
+  if (!review?.id || review.pr_number != null) return null;
   return associatedPrCache.get(review.id) ?? null;
 }
 

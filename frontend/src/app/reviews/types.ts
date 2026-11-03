@@ -9,6 +9,8 @@ import type { OutcomeKey, SortKey } from "./review-triage";
 
 export type { OutcomeKey, SortKey };
 
+export const PAGE_SIZE = 15;
+
 /**
  * Modern triage priority buckets.
  * - must_fix: Critical or high findings that block a clean merge.
