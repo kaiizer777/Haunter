@@ -146,11 +146,11 @@ export function TriageChips({
         className
       )}
     >
-      <div className="flex flex-wrap items-center gap-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         {/* Lead sentence — the triage verdict in words */}
         <p
           data-testid="triage-lead-sentence"
-          className="mr-1 text-xs text-zinc-300"
+          className="text-xs font-medium tracking-tight text-zinc-200"
         >
           {getLeadSentence(counts)}
         </p>
@@ -183,6 +183,7 @@ export function TriageChips({
           {TRIAGE_BUCKETS.map((bucket) => {
             const count = counts[bucket.key] ?? 0;
             const isActive = activeOutcome === bucket.key;
+            const isZero = count === 0;
             return (
               <button
                 key={bucket.key}
@@ -194,17 +195,27 @@ export function TriageChips({
                   "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
                   isActive
                     ? cn("font-semibold shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_1px_3px_rgba(0,0,0,0.3)]", bucket.active)
-                    : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+                    : isZero
+                      ? "border-zinc-800/60 bg-zinc-950/40 text-zinc-500 hover:border-zinc-800 hover:text-zinc-300"
+                      : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
                 )}
               >
                 <span
-                  className={cn("h-1.5 w-1.5 shrink-0 rounded-full", bucket.dot)}
+                  className={cn(
+                    "h-1.5 w-1.5 shrink-0 rounded-full transition-opacity",
+                    bucket.dot,
+                    isZero && !isActive ? "opacity-30" : "opacity-100"
+                  )}
                   aria-hidden="true"
                 />
                 <span>{bucket.label}</span>
                 <span
                   className={
-                    isActive ? "opacity-90 font-bold" : "text-zinc-500 font-normal"
+                    isActive
+                      ? "opacity-90 font-bold"
+                      : isZero
+                        ? "text-zinc-600 font-normal"
+                        : "text-zinc-400 font-medium"
                   }
                 >
                   {count}

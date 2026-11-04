@@ -67,141 +67,14 @@ export function FilterToolbar({
       role="region"
       aria-label="Filter and search reviews"
       className={cn(
-        "flex flex-col gap-3 rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] lg:flex-row lg:items-center lg:justify-between",
+        "flex flex-col gap-2.5 rounded-xl border border-zinc-800/80 bg-[#0f0f12] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]",
         className
       )}
     >
-      {/* Left controls: Repo picker, severity pills, risk toggle, hide failed */}
-      <div className="flex flex-wrap items-center gap-2.5">
-        {/* Repo selector dropdown */}
-        <div className="w-[200px] shrink-0">
-          <SelectDropdown
-            value={selectedRepoId}
-            onChange={onRepoChange}
-            options={repoOptions}
-            placeholder="All Repositories"
-          />
-        </div>
-
-        {/* Severity filter pills */}
-        <div
-          className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-xs"
-          role="group"
-          aria-label="Filter by finding severity"
-        >
-          {SEVERITIES.map((sev) => {
-            const isSelected = selectedSeverity.toLowerCase() === sev;
-            return (
-              <button
-                key={sev}
-                type="button"
-                onClick={() => onSeverityChange(sev)}
-                aria-pressed={isSelected}
-                className={cn(
-                  "rounded-md px-2.5 py-1 font-mono uppercase text-[10px] tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
-                  isSelected
-                    ? "bg-zinc-800 font-semibold text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
-                    : "text-zinc-400 hover:text-zinc-200"
-                )}
-              >
-                {sev}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* High Risk score filter toggle (risk >= 71) */}
-        <button
-          type="button"
-          onClick={onToggleHighRisk}
-          aria-pressed={highRiskOnly}
-          className={cn(
-            "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-mono transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 active:translate-y-[0.5px]",
-            highRiskOnly
-              ? "border-rose-500/50 bg-rose-950/40 font-semibold text-rose-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
-              : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-          )}
-        >
-          <ShieldAlert className="h-3.5 w-3.5 text-rose-400 shrink-0" />
-          <span>Risk ≥ {RISK_CRITICAL}</span>
-        </button>
-
-        {/* Hide-failed toggle */}
-        {(failedCount > 0 || hideFailed) && (
-          <button
-            type="button"
-            onClick={onToggleHideFailed}
-            aria-pressed={hideFailed}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-mono transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
-              hideFailed
-                ? "border-zinc-500/60 bg-zinc-800 font-semibold text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
-                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
-            )}
-          >
-            <EyeOff className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
-            <span>
-              {hideFailed
-                ? `Show failed (${failedCount})`
-                : `Hide failed (${failedCount})`}
-            </span>
-          </button>
-        )}
-
-        {/* Live Syncing radar badge */}
-        {isLiveSyncing && (
-          <div
-            role="status"
-            aria-label="Live Syncing active"
-            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-gradient-to-b from-amber-500/15 via-amber-500/10 to-amber-500/5 px-2.5 py-1 font-mono text-[11px] font-medium text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_8px_rgba(245,158,11,0.15)]"
-          >
-            <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
-            </span>
-            <Radio className="h-3 w-3 text-amber-400" aria-hidden="true" />
-            <span>Live Syncing</span>
-          </div>
-        )}
-      </div>
-
-      {/* Right controls: Sort pills and search input */}
-      <div className="flex flex-wrap items-center gap-2.5">
-        {/* Sort Group */}
-        <div
-          className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1"
-          role="group"
-          aria-label="Sort reviews on this page"
-        >
-          <SlidersHorizontal
-            className="ml-1.5 h-3.5 w-3.5 shrink-0 text-zinc-400"
-            aria-hidden="true"
-          />
-          {SORT_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              type="button"
-              onClick={() => onSortChange(opt.value)}
-              aria-pressed={sortKey === opt.value}
-              title={
-                opt.value === "attention"
-                  ? "Reorders reviews on this page: blockers first, clean last, failures at the bottom."
-                  : "Newest first. Matches repository incoming sequence."
-              }
-              className={cn(
-                "rounded-md px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
-                sortKey === opt.value
-                  ? "bg-zinc-800 font-semibold text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
-                  : "text-zinc-400 hover:text-zinc-200"
-              )}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
+      {/* Row 1: Search input (flex-1) + Repository dropdown */}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-2.5">
         {/* Search input with clear button */}
-        <div className="relative flex-1 sm:w-64 sm:flex-initial">
+        <div className="relative flex-1">
           <Search
             className="absolute left-2.5 top-2.5 h-3.5 w-3.5 text-zinc-400 pointer-events-none"
             aria-hidden="true"
@@ -224,6 +97,133 @@ export function FilterToolbar({
             </button>
           )}
         </div>
+
+        {/* Repo selector dropdown */}
+        <div className="w-full sm:w-[200px] shrink-0">
+          <SelectDropdown
+            value={selectedRepoId}
+            onChange={onRepoChange}
+            options={repoOptions}
+            placeholder="All Repositories"
+          />
+        </div>
+      </div>
+
+      {/* Row 2: Finding severity pills, Risk >= 71 toggle, sort toggle, and live sync radar */}
+      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+        {/* Severity filter pills */}
+        <div
+          className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1 text-xs"
+          role="group"
+          aria-label="Filter by finding severity"
+        >
+          {SEVERITIES.map((sev) => {
+            const isSelected = selectedSeverity.toLowerCase() === sev;
+            return (
+              <button
+                key={sev}
+                type="button"
+                onClick={() => onSeverityChange(sev)}
+                aria-pressed={isSelected}
+                className={cn(
+                  "rounded-md px-2 py-0.5 font-mono uppercase text-[10px] tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
+                  isSelected
+                    ? "bg-zinc-800 font-semibold text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
+                    : "text-zinc-400 hover:text-zinc-200"
+                )}
+              >
+                {sev}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* High Risk score filter toggle (risk >= 71) */}
+        <button
+          type="button"
+          onClick={onToggleHighRisk}
+          aria-pressed={highRiskOnly}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-mono transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 active:translate-y-[0.5px]",
+            highRiskOnly
+              ? "border-rose-500/50 bg-rose-950/40 font-semibold text-rose-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
+              : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+          )}
+        >
+          <ShieldAlert className="h-3.5 w-3.5 text-rose-400 shrink-0" />
+          <span>Risk ≥ {RISK_CRITICAL}</span>
+        </button>
+
+        {/* Hide-failed toggle */}
+        {(failedCount > 0 || hideFailed) && (
+          <button
+            type="button"
+            onClick={onToggleHideFailed}
+            aria-pressed={hideFailed}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-mono transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
+              hideFailed
+                ? "border-zinc-500/60 bg-zinc-800 font-semibold text-zinc-100 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_2px_4px_rgba(0,0,0,0.3)]"
+                : "border-zinc-800 bg-zinc-950 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200"
+            )}
+          >
+            <EyeOff className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+            <span>
+              {hideFailed
+                ? `Show failed (${failedCount})`
+                : `Hide failed (${failedCount})`}
+            </span>
+          </button>
+        )}
+
+        {/* Sort Group */}
+        <div
+          className="flex items-center rounded-lg border border-zinc-800 bg-zinc-950 p-1"
+          role="group"
+          aria-label="Sort reviews on this page"
+        >
+          <SlidersHorizontal
+            className="ml-1.5 h-3.5 w-3.5 shrink-0 text-zinc-400"
+            aria-hidden="true"
+          />
+          {SORT_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => onSortChange(opt.value)}
+              aria-pressed={sortKey === opt.value}
+              title={
+                opt.value === "attention"
+                  ? "Reorders reviews on this page: blockers first, clean last, failures at the bottom."
+                  : "Newest first. Matches repository incoming sequence."
+              }
+              className={cn(
+                "rounded-md px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 active:translate-y-[0.5px]",
+                sortKey === opt.value
+                  ? "bg-zinc-800 font-semibold text-zinc-100 shadow-[0_1px_3px_rgba(0,0,0,0.3)]"
+                  : "text-zinc-400 hover:text-zinc-200"
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Live Syncing radar badge */}
+        {isLiveSyncing && (
+          <div
+            role="status"
+            aria-label="Live Syncing active"
+            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-gradient-to-b from-amber-500/15 via-amber-500/10 to-amber-500/5 px-2.5 py-1 font-mono text-[11px] font-medium text-amber-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_0_8px_rgba(245,158,11,0.15)]"
+          >
+            <span className="relative flex h-2 w-2 shrink-0" aria-hidden="true">
+              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-400 opacity-75" />
+              <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-400" />
+            </span>
+            <Radio className="h-3 w-3 text-amber-400" aria-hidden="true" />
+            <span>Live Syncing</span>
+          </div>
+        )}
       </div>
     </div>
   );
