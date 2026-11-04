@@ -2168,12 +2168,28 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       const leftPane = gridContainer?.querySelector(".xl\\:col-span-5");
       expect(leftPane?.className).toContain("xl:h-full");
       expect(leftPane?.className).toContain("xl:min-h-0");
-      expect(leftPane?.className).toContain("xl:overflow-y-auto");
+      expect(leftPane?.className).toContain("flex");
+      expect(leftPane?.className).toContain("flex-col");
+      expect(leftPane?.className).toContain("rounded-xl");
+      expect(leftPane?.className).toContain("overflow-hidden");
+
+      const leftScroll = leftPane?.querySelector(".overflow-y-auto");
+      expect(leftScroll).not.toBeNull();
+      expect(leftScroll?.className).toContain("flex-1");
+      expect(leftScroll?.className).toContain("min-h-0");
 
       const rightPane = gridContainer?.querySelector(".xl\\:col-span-7");
       expect(rightPane?.className).toContain("xl:h-full");
       expect(rightPane?.className).toContain("xl:min-h-0");
-      expect(rightPane?.className).toContain("xl:overflow-y-auto");
+      expect(rightPane?.className).toContain("flex");
+      expect(rightPane?.className).toContain("flex-col");
+      expect(rightPane?.className).toContain("rounded-xl");
+      expect(rightPane?.className).toContain("overflow-hidden");
+
+      const rightScroll = rightPane?.querySelector(".overflow-y-auto");
+      expect(rightScroll).not.toBeNull();
+      expect(rightScroll?.className).toContain("flex-1");
+      expect(rightScroll?.className).toContain("min-h-0");
 
       window.matchMedia = originalMatchMedia;
       window.history.pushState({}, "", "/reviews");
