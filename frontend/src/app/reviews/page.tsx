@@ -609,6 +609,7 @@ export default function ReviewsPage() {
     <AppLayout
       title="Code Reviews"
       subtitle="Autonomous push-level code review & actionable remediation sentinel"
+      fullHeight={Boolean(selectedId && isDesktop)}
       actions={
         <div className="flex items-center gap-2">
           <Button
@@ -624,14 +625,14 @@ export default function ReviewsPage() {
         </div>
       }
     >
-      <div className="space-y-6 pb-12">
+      <div className={cn("space-y-6", selectedId && isDesktop ? "flex-1 min-h-0 flex flex-col" : "pb-12")}>
         {/* Selected review active: render desktop split pane on large screens, mobile fallback on narrow */}
         {selectedId ? (
           isDesktop ? (
             /* Master-Detail Split Pane on Desktop */
-            <div className="xl:grid xl:grid-cols-12 xl:gap-6 xl:h-[calc(100vh-140px)] xl:overflow-hidden items-start">
+            <div className="flex-1 min-h-0 xl:grid xl:grid-cols-12 xl:gap-6 xl:overflow-hidden">
               {/* Left Pane: Master List */}
-              <div className="xl:col-span-5 xl:h-full xl:overflow-y-auto xl:pr-2 space-y-4">
+              <div className="xl:col-span-5 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-2 space-y-4">
                 <FilterToolbar
                   searchQuery={searchQuery}
                   onSearchChange={setSearchQuery}
@@ -674,7 +675,7 @@ export default function ReviewsPage() {
               </div>
 
               {/* Right Pane: Detail Inspector */}
-              <div className="xl:col-span-7 xl:h-full xl:overflow-y-auto xl:pl-1">
+              <div className="xl:col-span-7 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pl-1">
                 {renderDetailPane(true)}
               </div>
             </div>

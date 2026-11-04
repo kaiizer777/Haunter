@@ -2125,5 +2125,61 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       // Not the sibling "filtered everything away" branch.
       expect(screen.queryByText(/nothing matches these filters/i)).not.toBeInTheDocument();
     });
+
+    it("docks desktop split view to full viewport height without bottom clipping or blank void", async () => {
+      const originalMatchMedia = window.matchMedia;
+      window.matchMedia = vi.fn().mockImplementation((query) => ({
+        matches: query === "(min-width: 1280px)",
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }));
+
+      const activeReview = row({ id: "rev_dock_1", pr_title: "docking check" });
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [activeReview],
+        total: 1,
+      });
+      vi.mocked(api.getReviewDetail).mockResolvedValue({
+        review: activeReview,
+        patches: [],
+      });
+
+      window.history.pushState({}, "", "/reviews?review=rev_dock_1");
+      const { container } = render(<ReviewsPage />);
+
+      expect(await screen.findByText("docking check")).toBeInTheDocument();
+
+      const gridContainer = container.querySelector(".xl\\:grid-cols-12");
+      expect(gridContainer).not.toBeNull();
+      expect(gridContainer?.className).toContain("flex-1");
+      expect(gridContainer?.className).toContain("min-h-0");
+      expect(gridContainer?.className).toContain("xl:overflow-hidden");
+      expect(gridContainer?.className).not.toContain("xl:h-[calc(100vh-140px)]");
+
+      const outerWrapper = gridContainer?.parentElement;
+      expect(outerWrapper?.className).toContain("flex-1");
+      expect(outerWrapper?.className).toContain("min-h-0");
+      expect(outerWrapper?.className).toContain("flex");
+      expect(outerWrapper?.className).toContain("flex-col");
+      expect(outerWrapper?.className).not.toContain("pb-12");
+
+      const leftPane = gridContainer?.querySelector(".xl\\:col-span-5");
+      expect(leftPane?.className).toContain("xl:h-full");
+      expect(leftPane?.className).toContain("xl:min-h-0");
+      expect(leftPane?.className).toContain("xl:overflow-y-auto");
+
+      const rightPane = gridContainer?.querySelector(".xl\\:col-span-7");
+      expect(rightPane?.className).toContain("xl:h-full");
+      expect(rightPane?.className).toContain("xl:min-h-0");
+      expect(rightPane?.className).toContain("xl:overflow-y-auto");
+
+      window.matchMedia = originalMatchMedia;
+      window.history.pushState({}, "", "/reviews");
+    });
   });
 });
