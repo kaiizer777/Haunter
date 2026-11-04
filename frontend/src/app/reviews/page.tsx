@@ -6,6 +6,7 @@ import {
   RefreshCw,
   Inbox,
   ShieldCheck,
+  X,
 } from "lucide-react";
 import { AppLayout } from "@/components/layout/app-layout";
 import { Button } from "@/components/ui/button";
@@ -423,15 +424,26 @@ export default function ReviewsPage() {
           size="sm"
           onClick={closeReview}
           ref={backButtonRef}
-          className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800"
+          aria-label={isSplitDesktop ? "Close inspector" : "Back to reviews"}
+          className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 active:translate-y-[0.5px]"
         >
-          <ArrowLeft className="h-3.5 w-3.5" />
-          <span>Back to reviews</span>
+          {isSplitDesktop ? (
+            <>
+              <X className="h-3.5 w-3.5" />
+              <span>Close inspector</span>
+            </>
+          ) : (
+            <>
+              <ArrowLeft className="h-3.5 w-3.5" />
+              <span>Back to reviews</span>
+            </>
+          )}
         </Button>
         {isSplitDesktop && (
-          <span className="font-mono text-[11px] text-zinc-400">
-            Detail Inspector
-          </span>
+          <div className="border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-mono text-zinc-300 rounded-md flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
+            <span>Detail Inspector</span>
+          </div>
         )}
       </div>
 
@@ -551,7 +563,12 @@ export default function ReviewsPage() {
               review={review}
               onOpen={openReview}
               onRetry={handleRefresh}
-              className={selectedId === review.id ? "ring-2 ring-amber-400/80 border-amber-500/60" : undefined}
+              isSelected={selectedId === review.id}
+              className={
+                selectedId === review.id
+                  ? "border-l-4 border-l-amber-500 bg-zinc-900/60 shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+                  : undefined
+              }
             />
           ))}
         </div>
@@ -612,9 +629,9 @@ export default function ReviewsPage() {
         {selectedId ? (
           isDesktop ? (
             /* Master-Detail Split Pane on Desktop */
-            <div className="xl:grid xl:grid-cols-12 xl:gap-6 items-start">
+            <div className="xl:grid xl:grid-cols-12 xl:gap-6 xl:h-[calc(100vh-140px)] xl:overflow-hidden items-start">
               {/* Left Pane: Master List */}
-              <div className="xl:col-span-5 space-y-4">
+              <div className="xl:col-span-5 xl:h-full xl:overflow-y-auto xl:pr-2 space-y-4">
                 <FilterToolbar
                   searchQuery={searchQuery}
                   onSearchChange={setSearchQuery}
@@ -657,7 +674,7 @@ export default function ReviewsPage() {
               </div>
 
               {/* Right Pane: Detail Inspector */}
-              <div className="xl:col-span-7 sticky top-6">
+              <div className="xl:col-span-7 xl:h-full xl:overflow-y-auto xl:pl-1">
                 {renderDetailPane(true)}
               </div>
             </div>

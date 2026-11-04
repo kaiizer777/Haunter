@@ -137,6 +137,7 @@ export interface FailedReviewCardProps {
   onOpen: (id: string) => void;
   onRetry?: () => void;
   className?: string;
+  isSelected?: boolean;
 }
 
 /**
@@ -148,10 +149,15 @@ export function FailedReviewCard({
   onOpen,
   onRetry,
   className,
+  isSelected = false,
 }: FailedReviewCardProps) {
   const [expanded, setExpanded] = useState(false);
   const [copiedError, setCopiedError] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
+
+  const selectedClass = isSelected
+    ? "border-l-4 border-l-amber-500 bg-zinc-900/60 shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+    : undefined;
 
   const errorText = review.failure_reason ?? review.summary;
   const panelId = `failure-detail-${review.id}`;
@@ -186,7 +192,7 @@ export function FailedReviewCard({
 
   return (
     <div
-      className={cn(ROW_SURFACE, "border-rose-500/25", className)}
+      className={cn(ROW_SURFACE, "border-rose-500/25", selectedClass, className)}
       data-testid="failed-review-card"
     >
       <div className="flex flex-col gap-4 p-5">
@@ -361,6 +367,7 @@ export interface PendingReviewCardProps {
   review: CodeReviewOut;
   onOpen: (id: string) => void;
   className?: string;
+  isSelected?: boolean;
 }
 
 /**
@@ -370,6 +377,7 @@ export function PendingReviewCard({
   review,
   onOpen,
   className,
+  isSelected = false,
 }: PendingReviewCardProps) {
   const label = isSuppressedUnscored(review)
     ? "Suppressed"
@@ -381,6 +389,10 @@ export function PendingReviewCard({
   const shortSha = review.commit_sha
     ? review.commit_sha.substring(0, 7)
     : "unknown";
+
+  const selectedClass = isSelected
+    ? "border-l-4 border-l-amber-500 bg-zinc-900/60 shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+    : undefined;
 
   const statusChip = (
     <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] font-mono font-semibold uppercase tracking-wider text-zinc-300">
@@ -394,7 +406,7 @@ export function PendingReviewCard({
 
   return (
     <div
-      className={cn(ROW_SURFACE, className)}
+      className={cn(ROW_SURFACE, selectedClass, className)}
       data-testid="pending-review-card"
     >
       <div className="flex flex-col gap-5 p-5 md:flex-row md:items-start">
@@ -460,6 +472,7 @@ export interface ReviewCardProps {
   onOpen: (id: string) => void;
   onRetry?: () => void;
   className?: string;
+  isSelected?: boolean;
 }
 
 /**
@@ -473,9 +486,14 @@ export function ReviewCard({
   onOpen,
   onRetry,
   className,
+  isSelected = false,
 }: ReviewCardProps) {
   const [expanded, setExpanded] = useState(false);
   const findingsPanelId = `findings-${review.id}`;
+
+  const selectedClass = isSelected
+    ? "border-l-4 border-l-amber-500 bg-zinc-900/60 shadow-[0_4px_24px_rgba(0,0,0,0.5)]"
+    : undefined;
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -495,6 +513,7 @@ export function ReviewCard({
         onOpen={onOpen}
         onRetry={onRetry}
         className={className}
+        isSelected={isSelected}
       />
     );
   }
@@ -505,6 +524,7 @@ export function ReviewCard({
         review={review}
         onOpen={onOpen}
         className={className}
+        isSelected={isSelected}
       />
     );
   }
@@ -544,6 +564,7 @@ export function ReviewCard({
       className={cn(
         ROW_SURFACE,
         "transition-all duration-150 hover:border-zinc-700/80 hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_24px_rgba(0,0,0,0.5)]",
+        selectedClass,
         className
       )}
     >
