@@ -39,7 +39,7 @@ export function AppLayout({
       <div
         className={cn(
           "flex bg-[#09090b]",
-          fullHeight ? "h-screen h-[100dvh] overflow-hidden" : "min-h-screen"
+          fullHeight ? "h-screen supports-[height:100dvh]:h-dvh overflow-hidden" : "min-h-screen"
         )}
       >
         {/* Skeleton Sidebar */}
@@ -78,7 +78,7 @@ export function AppLayout({
     <div
       className={cn(
         "bg-[#09090b] text-zinc-100 flex flex-row",
-        fullHeight ? "h-screen h-[100dvh] overflow-hidden" : "min-h-screen"
+        fullHeight ? "h-screen supports-[height:100dvh]:h-dvh overflow-hidden" : "min-h-screen"
       )}
     >
       {/* Fixed Sidebar */}

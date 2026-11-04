@@ -164,15 +164,16 @@ describe("app-layout.tsx", () => {
     );
 
     const rootWrapper = container.firstChild as HTMLElement;
-    expect(rootWrapper.className).toContain("h-[100dvh]");
-    expect(rootWrapper.className).toContain("overflow-hidden");
+    expect(rootWrapper).toHaveClass("h-screen");
+    expect(rootWrapper).toHaveClass("supports-[height:100dvh]:h-dvh");
+    expect(rootWrapper).toHaveClass("overflow-hidden");
 
     const mainElement = screen.getByRole("main");
-    expect(mainElement.className).toContain("min-h-0");
-    expect(mainElement.className).toContain("p-5");
-    expect(mainElement.className).toContain("flex");
-    expect(mainElement.className).toContain("flex-col");
-    expect(mainElement.className).toContain("overflow-hidden");
+    expect(mainElement).toHaveClass("min-h-0");
+    expect(mainElement).toHaveClass("p-5");
+    expect(mainElement).toHaveClass("flex");
+    expect(mainElement).toHaveClass("flex-col");
+    expect(mainElement).toHaveClass("overflow-hidden");
 
     // Standard unconstrained mode
     rerender(
@@ -180,9 +181,10 @@ describe("app-layout.tsx", () => {
         <div data-testid="split-layout">List View</div>
       </AppLayout>
     );
-    expect(rootWrapper.className).toContain("min-h-screen");
-    expect(rootWrapper.className).not.toContain("h-[100dvh]");
-    expect(mainElement.className).toContain("p-5");
-    expect(mainElement.className).toContain("overflow-y-auto");
+    expect(rootWrapper).toHaveClass("min-h-screen");
+    expect(rootWrapper).not.toHaveClass("supports-[height:100dvh]:h-dvh");
+    expect(rootWrapper).not.toHaveClass("h-screen");
+    expect(mainElement).toHaveClass("p-5");
+    expect(mainElement).toHaveClass("overflow-y-auto");
   });
 });
