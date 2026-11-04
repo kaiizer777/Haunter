@@ -214,7 +214,7 @@ export function TriageChips({
                     isActive
                       ? "opacity-90 font-bold"
                       : isZero
-                        ? "text-zinc-600 font-normal"
+                        ? "text-zinc-500 font-normal"
                         : "text-zinc-400 font-medium"
                   }
                 >

@@ -61,6 +61,7 @@ describe("TriageChips component", () => {
     const suppressedBtn = screen.getByRole("button", { name: /Suppressed/i });
     expect(suppressedBtn).toHaveAttribute("aria-pressed", "false");
     expect(suppressedBtn).toHaveTextContent("0");
+    expect(within(suppressedBtn).getByText("0")).toHaveClass("text-zinc-500");
 
     const cleanBtn = screen.getByRole("button", { name: /Great to merge/i });
     expect(cleanBtn).toHaveAttribute("aria-pressed", "false");
