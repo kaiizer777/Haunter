@@ -2144,10 +2144,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
         reviews: [activeReview],
         total: 1,
       });
-      vi.mocked(api.getReviewDetail).mockResolvedValue({
-        review: activeReview,
-        patches: [],
-      });
+      vi.mocked(api.getReviewDetail).mockResolvedValue(activeReview);
 
       window.history.pushState({}, "", "/reviews?review=rev_dock_1");
       const { container } = render(<ReviewsPage />);
