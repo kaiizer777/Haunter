@@ -56,7 +56,7 @@ export function PrPill({
         title={`View PR #${prNumber} on GitHub`}
         className={cn(
           IDENTITY_PILL_BASE,
-          "bg-amber-500/15 text-amber-300 border-amber-400/40 hover:bg-amber-500/25 hover:text-amber-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+          "border-zinc-700/80 bg-zinc-900/90 text-zinc-200 hover:border-zinc-600 hover:text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
           className
         )}
       >
@@ -69,7 +69,7 @@ export function PrPill({
     <span
       className={cn(
         IDENTITY_PILL_BASE,
-        "bg-amber-500/15 text-amber-300 border-amber-400/40 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+        "border-zinc-700/80 bg-zinc-900/90 text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
         className
       )}
     >

@@ -92,6 +92,35 @@ function resolveFindingPriority(finding: ReviewFindingOut): PriorityBucket {
 }
 
 /**
+ * Formats CLI flags (--repo, -f), file paths (*.ext), env vars, and backticked
+ * code inside summary text as legible inline code chips.
+ */
+export function renderFormattedSummary(text?: string | null): React.ReactNode {
+  if (!text) return null;
+
+  const regex = /(`[^`]+`|\b--[a-zA-Z0-9_-]+|\b[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|md|py|go|rs|css|html|yml|yaml|toml)\b|\b[A-Z][A-Z0-9_]{2,}\b)/g;
+  const parts = text.split(regex);
+  if (parts.length === 1) return text;
+
+  return parts.map((part, index) => {
+    if (!part) return null;
+    if (regex.test(part)) {
+      regex.lastIndex = 0;
+      const clean = part.startsWith("`") && part.endsWith("`") ? part.slice(1, -1) : part;
+      return (
+        <code
+          key={index}
+          className="font-mono text-xs bg-zinc-800/80 px-1 py-0.5 rounded text-zinc-200"
+        >
+          {clean}
+        </code>
+      );
+    }
+    return <React.Fragment key={index}>{part}</React.Fragment>;
+  });
+}
+
+/**
  * Comprehensive Code Review Deep-Dive Inspector.
  *
  * Provides a high-density audit inspection surface including:
@@ -230,7 +259,7 @@ export function ReviewDetail({
           )}
         </div>
 
-        <div className="mt-3 flex flex-col lg:flex-row lg:items-start justify-between gap-5">
+        <div className="mt-3 flex flex-col lg:flex-row lg:items-center justify-between gap-5">
           <div className="flex-1 min-w-0 space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               {repoUrl ? (
@@ -308,11 +337,15 @@ export function ReviewDetail({
               )}
             </div>
 
-            {review.pr_title && (
-              <h2 className="text-xl font-bold tracking-tight text-zinc-50 leading-snug">
-                {review.pr_title}
-              </h2>
-            )}
+            <h2 className="text-xl font-bold tracking-tight text-zinc-50 leading-snug">
+              {review.pr_title?.trim()
+                ? review.pr_title
+                : review.pr_number
+                  ? `PR #${review.pr_number} (Audit Report)`
+                  : review.commit_sha
+                    ? `Commit ${commitShort} (Audit Report)`
+                    : "Audit Report"}
+            </h2>
 
             <div className="flex flex-wrap items-center gap-2 text-[11px] font-mono">
               <BranchFlow
@@ -475,7 +508,7 @@ export function ReviewDetail({
               PR Summary
             </h3>
             <p className="mt-2 text-sm text-zinc-300 leading-relaxed">
-              {review.summary}
+              {renderFormattedSummary(review.summary)}
             </p>
           </section>
 
@@ -542,8 +575,8 @@ export function ReviewDetail({
             <h3 className="text-[10px] font-mono font-semibold uppercase tracking-[0.16em] text-zinc-400">
               PR Summary
             </h3>
-            <p className="mt-2 max-w-[75ch] text-sm leading-relaxed text-zinc-200">
-              {review.summary}
+            <p className="mt-2 max-w-[75ch] text-sm leading-relaxed text-zinc-300">
+              {renderFormattedSummary(review.summary)}
             </p>
           </section>
 
@@ -576,7 +609,7 @@ export function ReviewDetail({
                   <dd
                     className={cn(
                       "text-base font-bold tabular-nums",
-                      verdict.band.text
+                      review.risk_score === 0 ? "text-emerald-400" : verdict.band.text
                     )}
                   >
                     {review.risk_score}
@@ -590,7 +623,7 @@ export function ReviewDetail({
                   <dd
                     className={cn(
                       "text-base font-bold tabular-nums",
-                      blockers.mustFix > 0 ? "text-rose-400" : "text-emerald-400"
+                      blockers.mustFix > 0 ? "text-rose-400" : "text-zinc-400"
                     )}
                   >
                     {blockers.mustFix}
@@ -605,7 +638,7 @@ export function ReviewDetail({
                       "text-base font-bold tabular-nums",
                       blockers.shouldFix > 0
                         ? "text-amber-400"
-                        : "text-emerald-400"
+                        : "text-zinc-400"
                     )}
                   >
                     {blockers.shouldFix}
@@ -615,7 +648,12 @@ export function ReviewDetail({
                   <dt className="text-[10px] uppercase tracking-wider text-zinc-400">
                     Notes
                   </dt>
-                  <dd className="text-base font-bold tabular-nums text-zinc-300">
+                  <dd
+                    className={cn(
+                      "text-base font-bold tabular-nums",
+                      suggestionsCount > 0 ? "text-zinc-300" : "text-zinc-500"
+                    )}
+                  >
                     {suggestionsCount}
                   </dd>
                 </div>
@@ -624,19 +662,19 @@ export function ReviewDetail({
 
             {/* Supporting telemetry facts */}
             <dl className="grid grid-cols-1 gap-px bg-zinc-800/80 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
-                <dt className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold">
+              <div className="bg-zinc-950/90 px-4 py-3 space-y-1">
+                <dt className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-semibold">
                   Confidence
                 </dt>
-                <dd className="text-sm font-bold text-zinc-100">
-                  {confidence}/10
-                  <span className="ml-1.5 text-[10px] font-normal text-zinc-500">
+                <dd className="font-mono text-sm font-bold text-zinc-100 flex items-center gap-1.5">
+                  <span>{confidence}/10</span>
+                  <span className="text-[11px] font-normal text-zinc-500 font-sans">
                     in gauge ring
                   </span>
                 </dd>
               </div>
-              <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
-                <dt className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold">
+              <div className="bg-zinc-950/90 px-4 py-3 space-y-1">
+                <dt className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-semibold">
                   Diff
                 </dt>
                 <dd className="font-mono text-sm text-zinc-100">
@@ -646,26 +684,26 @@ export function ReviewDetail({
                   <span className="text-rose-400">-{blast.deletions}</span>
                 </dd>
               </div>
-              <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
-                <dt className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold">
+              <div className="bg-zinc-950/90 px-4 py-3 space-y-1">
+                <dt className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-semibold">
                   Blast Radius
                 </dt>
-                <dd className="font-mono text-sm font-bold text-zinc-100">
-                  {radius.label}
-                </dd>
-                <dd className="text-[10px] text-zinc-400 font-sans">
-                  {radius.explanation}
+                <dd className="font-mono text-sm font-bold text-zinc-100 flex items-center gap-1.5 min-w-0" title={radius.explanation}>
+                  <span className="shrink-0">{radius.label}</span>
+                  <span className="text-[11px] font-normal text-zinc-500 font-sans truncate">
+                    · {radius.explanation}
+                  </span>
                 </dd>
               </div>
-              <div className="bg-zinc-950/90 px-4 py-3 space-y-0.5">
-                <dt className="text-[10px] uppercase tracking-wider text-zinc-400 font-semibold">
+              <div className="bg-zinc-950/90 px-4 py-3 space-y-1">
+                <dt className="text-[10px] font-mono uppercase tracking-wider text-zinc-400 font-semibold">
                   Analysis Cost
                 </dt>
-                <dd className="font-mono text-sm text-zinc-100">
-                  {review.input_tokens + review.output_tokens} tok
-                </dd>
-                <dd className="text-[10px] text-zinc-400 uppercase">
-                  {review.status}
+                <dd className="font-mono text-sm text-zinc-100 flex items-center gap-1.5">
+                  <span className="font-bold">{review.input_tokens + review.output_tokens} tok</span>
+                  <span className="text-[10px] text-zinc-500 uppercase font-mono">
+                    ({review.status})
+                  </span>
                 </dd>
               </div>
             </dl>
