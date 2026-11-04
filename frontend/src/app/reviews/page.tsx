@@ -670,46 +670,54 @@ export default function ReviewsPage() {
             /* Master-Detail Split Pane on Desktop */
             <div className="flex-1 min-h-0 xl:grid xl:grid-cols-12 xl:gap-6 xl:overflow-hidden">
               {/* Left Pane: Master List */}
-              <div className="xl:col-span-5 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pr-2 space-y-4">
-                <FilterToolbar
-                  searchQuery={searchQuery}
-                  onSearchChange={setSearchQuery}
-                  selectedRepoId={selectedRepoId}
-                  onRepoChange={(repoId) => {
-                    setSelectedRepoId(repoId);
-                    setPage(0);
-                  }}
-                  repoOptions={repoOptions}
-                  selectedSeverity={selectedSeverity}
-                  onSeverityChange={(sev) => {
-                    setSelectedSeverity(sev);
-                    setPage(0);
-                  }}
-                  highRiskOnly={highRiskOnly}
-                  onToggleHighRisk={() => {
-                    const nextVal = !highRiskOnly;
-                    setHighRiskOnly(nextVal);
-                    setActiveTab(nextVal ? "high_risk" : "all");
-                    setPage(0);
-                  }}
-                  hideFailed={hideFailed}
-                  onToggleHideFailed={() => setHideFailed((v) => !v)}
-                  failedCount={failedCount}
-                  sortKey={sortKey}
-                  onSortChange={(k) => {
-                    setSortKey(k);
-                    setPage(0);
-                  }}
-                  isLiveSyncing={isLiveSyncing}
-                />
-                {!loading && reviews.length > 0 && (
-                  <TriageChips
-                    counts={triageCounts}
-                    activeOutcome={activeOutcome}
-                    onToggle={(key) => setActiveOutcome(key)}
+              <div className="xl:col-span-5 xl:h-full xl:min-h-0 flex flex-col rounded-xl border border-zinc-800/80 bg-[#0c0c0e]/60 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_32px_rgba(0,0,0,0.45)] overflow-hidden">
+                <div className="shrink-0 p-3.5 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md rounded-t-xl space-y-3 z-10">
+                  <FilterToolbar
+                    searchQuery={searchQuery}
+                    onSearchChange={setSearchQuery}
+                    selectedRepoId={selectedRepoId}
+                    onRepoChange={(repoId) => {
+                      setSelectedRepoId(repoId);
+                      setPage(0);
+                    }}
+                    repoOptions={repoOptions}
+                    selectedSeverity={selectedSeverity}
+                    onSeverityChange={(sev) => {
+                      setSelectedSeverity(sev);
+                      setPage(0);
+                    }}
+                    highRiskOnly={highRiskOnly}
+                    onToggleHighRisk={() => {
+                      const nextVal = !highRiskOnly;
+                      setHighRiskOnly(nextVal);
+                      setActiveTab(nextVal ? "high_risk" : "all");
+                      setPage(0);
+                    }}
+                    hideFailed={hideFailed}
+                    onToggleHideFailed={() => setHideFailed((v) => !v)}
+                    failedCount={failedCount}
+                    sortKey={sortKey}
+                    onSortChange={(k) => {
+                      setSortKey(k);
+                      setPage(0);
+                    }}
+                    isLiveSyncing={isLiveSyncing}
                   />
-                )}
-                {renderReviewsStream()}
+                  {!loading && reviews.length > 0 && (
+                    <TriageChips
+                      counts={triageCounts}
+                      activeOutcome={activeOutcome}
+                      onToggle={(key) => setActiveOutcome(key)}
+                    />
+                  )}
+                </div>
+                <div
+                  className="flex-1 min-h-0 overflow-y-auto p-3.5 space-y-3.5 pb-8 focus:outline-none"
+                  tabIndex={0}
+                  aria-label="Review stream"
+                >
+                  {renderReviewsStream()}
+                </div>
               </div>
 
               {/* Right Pane: Detail Inspector */}
