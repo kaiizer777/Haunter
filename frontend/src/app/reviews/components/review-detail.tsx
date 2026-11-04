@@ -98,7 +98,7 @@ function resolveFindingPriority(finding: ReviewFindingOut): PriorityBucket {
 export function renderFormattedSummary(text?: string | null): React.ReactNode {
   if (!text) return null;
 
-  const regex = /(`[^`]+`|\b--[a-zA-Z0-9_-]+|\b[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|md|py|go|rs|css|html|yml|yaml|toml)\b|\b[A-Z][A-Z0-9_]{2,}\b)/g;
+  const regex = /(`[^`]+`|(?<![\w-])(?:--[a-zA-Z0-9_-]+|-[a-zA-Z0-9])\b|\b[a-zA-Z0-9_./-]+\.(?:ts|tsx|js|jsx|json|md|py|go|rs|css|html|yml|yaml|toml)\b|\b[A-Z][A-Z0-9_]{2,}\b)/g;
   const parts = text.split(regex);
   if (parts.length === 1) return text;
 

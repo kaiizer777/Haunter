@@ -1,7 +1,7 @@
 import React from "react";
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { ReviewDetail } from "./review-detail";
+import { ReviewDetail, renderFormattedSummary } from "./review-detail";
 import type { CodeReviewOut } from "../types";
 
 const mockDetailedReview: CodeReviewOut = {
@@ -213,5 +213,61 @@ describe("ReviewDetail component", () => {
 
     expect(screen.getAllByText("Queued").length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText("Autonomous code review queued.")).toBeInTheDocument();
+  });
+
+  describe("renderFormattedSummary", () => {
+    it("returns null for empty or null text", () => {
+      expect(renderFormattedSummary(null)).toBeNull();
+      expect(renderFormattedSummary("")).toBeNull();
+    });
+
+    it("formats CLI flags with leading double and single hyphens as code chips", () => {
+      const { container } = render(
+        <div>{renderFormattedSummary("Run with --repo kaiizer/Haunter and -f flag")}</div>
+      );
+
+      const codeElements = container.querySelectorAll("code");
+      expect(codeElements).toHaveLength(2);
+      expect(codeElements[0]).toHaveTextContent("--repo");
+      expect(codeElements[1]).toHaveTextContent("-f");
+    });
+
+    it("formats flags at start of text and within parentheses", () => {
+      const { container } = render(
+        <div>{renderFormattedSummary("--repo is primary; options (--force, -v) supported")}</div>
+      );
+
+      const codeElements = container.querySelectorAll("code");
+      expect(codeElements).toHaveLength(3);
+      expect(codeElements[0]).toHaveTextContent("--repo");
+      expect(codeElements[1]).toHaveTextContent("--force");
+      expect(codeElements[2]).toHaveTextContent("-v");
+    });
+
+    it("does not split hyphenated English words", () => {
+      const { container } = render(
+        <div>{renderFormattedSummary("This is a built-in, user-facing feature with high-priority tasks")}</div>
+      );
+
+      const codeElements = container.querySelectorAll("code");
+      expect(codeElements).toHaveLength(0);
+      expect(container).toHaveTextContent(
+        "This is a built-in, user-facing feature with high-priority tasks"
+      );
+    });
+
+    it("formats backticks, file paths, and environment variables", () => {
+      const { container } = render(
+        <div>
+          {renderFormattedSummary("Inspect `config.get()` in src/app/reviews/page.tsx with API_SECRET")}
+        </div>
+      );
+
+      const codeElements = container.querySelectorAll("code");
+      expect(codeElements).toHaveLength(3);
+      expect(codeElements[0]).toHaveTextContent("config.get()");
+      expect(codeElements[1]).toHaveTextContent("src/app/reviews/page.tsx");
+      expect(codeElements[2]).toHaveTextContent("API_SECRET");
+    });
   });
 });
