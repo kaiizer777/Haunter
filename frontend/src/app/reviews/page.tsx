@@ -416,86 +416,124 @@ export default function ReviewsPage() {
   }, []);
 
   // Shared detail pane renderer
-  const renderDetailPane = (isSplitDesktop = false) => (
-    <div aria-live="polite" className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={closeReview}
-          ref={backButtonRef}
-          aria-label={isSplitDesktop ? "Close inspector" : "Back to reviews"}
-          className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 active:translate-y-[0.5px]"
-        >
-          {isSplitDesktop ? (
-            <>
-              <X className="h-3.5 w-3.5" />
-              <span>Close inspector</span>
-            </>
-          ) : (
-            <>
-              <ArrowLeft className="h-3.5 w-3.5" />
-              <span>Back to reviews</span>
-            </>
-          )}
-        </Button>
-        {isSplitDesktop && (
-          <div className="border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-mono text-zinc-300 rounded-md flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
-            <span>Detail Inspector</span>
+  const renderDetailPane = (isSplitDesktop = false) => {
+    const detailContent = (
+      <>
+        {fetchError && (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300">
+            <span role="alert">Refresh failed: {fetchError}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDetailRetry}
+              className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+            >
+              Retry
+            </Button>
           </div>
         )}
+
+        {detailLoading || (!detailReview && !detailError) ? (
+          <div className="space-y-4" role="status" aria-label="Loading review detail">
+            <Skeleton className="h-8 w-64" />
+            <div className="rounded-xl border border-zinc-800/80 bg-[#111114] p-5 space-y-3">
+              <Skeleton className="h-5 w-48" />
+              <Skeleton className="h-4 w-full" />
+              <Skeleton className="h-4 w-3/4" />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              {[1, 2, 3, 4].map((n) => (
+                <Skeleton key={n} className="h-20 w-full" />
+              ))}
+            </div>
+          </div>
+        ) : detailError || !detailReview ? (
+          <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300">
+            <span role="alert">{detailError ?? "Review not found."}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleDetailRetry}
+              className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
+            >
+              Retry
+            </Button>
+          </div>
+        ) : (
+          <ReviewDetail
+            key={detailReview.id}
+            review={detailReview}
+            onRetry={handleDetailRetry}
+          />
+        )}
+      </>
+    );
+
+    if (isSplitDesktop) {
+      return (
+        <div
+          aria-live="polite"
+          className="xl:col-span-7 xl:h-full xl:min-h-0 flex flex-col rounded-xl border border-zinc-800/80 bg-[#0c0c0e]/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.04),0_8px_32px_rgba(0,0,0,0.45)] overflow-hidden"
+        >
+          {/* Pinned Header */}
+          <div className="shrink-0 flex items-center justify-between gap-3 px-4 py-3 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur-md rounded-t-xl z-10">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={closeReview}
+              ref={backButtonRef}
+              aria-label="Close inspector"
+              className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 active:translate-y-[0.5px]"
+            >
+              <X className="h-3.5 w-3.5" />
+              <span>Close inspector</span>
+            </Button>
+            <div className="border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 text-[11px] font-mono text-zinc-300 rounded-md flex items-center gap-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+              <span className="h-1.5 w-1.5 rounded-full bg-amber-400" aria-hidden="true" />
+              <span>Detail Inspector</span>
+            </div>
+          </div>
+
+          {/* Scrollable Card Body */}
+          <div
+            className="flex-1 min-h-0 overflow-y-auto p-4 md:p-5 space-y-5 pb-8 focus:outline-none"
+            tabIndex={0}
+            aria-label="Review detail content"
+          >
+            {detailContent}
+          </div>
+
+          {/* Pinned Status Footer */}
+          <div className="shrink-0 flex items-center justify-between px-4 py-2 border-t border-zinc-800/80 bg-zinc-950/90 text-[11px] font-mono text-zinc-400 rounded-b-xl">
+            <div className="flex items-center gap-2 truncate">
+              <span className="text-zinc-500">Sentinel ID:</span>
+              <span className="truncate text-zinc-300">{detailReview?.id ?? selectedId ?? "active"}</span>
+            </div>
+            <span className="shrink-0 text-zinc-500">ESC to close</span>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div aria-live="polite" className="space-y-4">
+        <div className="flex items-center justify-between gap-3">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={closeReview}
+            ref={backButtonRef}
+            aria-label="Back to reviews"
+            className="h-8 gap-1.5 border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 active:translate-y-[0.5px]"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            <span>Back to reviews</span>
+          </Button>
+        </div>
+        {detailContent}
       </div>
-
-      {fetchError && (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300">
-          <span role="alert">Refresh failed: {fetchError}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleDetailRetry}
-            className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
-          >
-            Retry
-          </Button>
-        </div>
-      )}
-
-      {detailLoading || (!detailReview && !detailError) ? (
-        <div className="space-y-4" role="status" aria-label="Loading review detail">
-          <Skeleton className="h-8 w-64" />
-          <div className="rounded-xl border border-zinc-800/80 bg-[#111114] p-5 space-y-3">
-            <Skeleton className="h-5 w-48" />
-            <Skeleton className="h-4 w-full" />
-            <Skeleton className="h-4 w-3/4" />
-          </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {[1, 2, 3, 4].map((n) => (
-              <Skeleton key={n} className="h-20 w-full" />
-            ))}
-          </div>
-        </div>
-      ) : detailError || !detailReview ? (
-        <div className="flex items-center justify-between gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 px-4 py-2.5 text-xs font-mono text-rose-300">
-          <span role="alert">{detailError ?? "Review not found."}</span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={handleDetailRetry}
-            className="h-7 border-rose-500/40 text-xs text-rose-200 hover:bg-rose-900/40"
-          >
-            Retry
-          </Button>
-        </div>
-      ) : (
-        <ReviewDetail
-          key={detailReview.id}
-          review={detailReview}
-          onRetry={handleDetailRetry}
-        />
-      )}
-    </div>
-  );
+    );
+  };
 
   // Shared reviews list stream renderer
   const renderReviewsStream = () => (
@@ -675,9 +713,7 @@ export default function ReviewsPage() {
               </div>
 
               {/* Right Pane: Detail Inspector */}
-              <div className="xl:col-span-7 xl:h-full xl:min-h-0 xl:overflow-y-auto xl:pl-1">
-                {renderDetailPane(true)}
-              </div>
+              {renderDetailPane(true)}
             </div>
           ) : (
             /* Mobile / Tablet Responsive Fallback */
