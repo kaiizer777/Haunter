@@ -2165,7 +2165,8 @@ async def _post_auditor_helpful_comment(
 
     `kind` is `"help"` or `"ambiguous"`. Runs only after the GitHub token
     is resolved; any post failure is logged and swallowed so the delivery
-    itself still stands, mirroring `_post_issue_trigger_ack`.
+    itself still stands, mirroring `_post_issue_trigger_ack`. Unknown
+    `kind` values fall back to the generic help body.
     """
     from app import github_client
 
