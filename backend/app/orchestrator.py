@@ -1970,17 +1970,27 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             # burn the full Lambda budget.
             # The semaphore bounds concurrent heavy pipelines: at most
             # ORCHESTRATOR_MAX_CONCURRENT_PIPELINES bodies run at once.
-            async with _PIPELINE_SEMAPHORE:
-                await asyncio.wait_for(
-                    _orchestrator_pipeline_body(
+            # The permit wait sits INSIDE the wall-clock timeout, so a
+            # pipeline queued behind a full semaphore still counts against
+            # the 800s budget instead of idling past the Lambda limit
+            # without ever reaching the timeout handler below. The cap is
+            # per-process: separate Lambda environments do not share this
+            # semaphore, so fleet-wide admission stays a deployment
+            # concern (reserved concurrency), not this in-process bound.
+            async def _admitted_pipeline_body() -> None:
+                async with _PIPELINE_SEMAPHORE:
+                    await _orchestrator_pipeline_body(
                         db=db,
                         run_id=run_id,
                         run=run,
                         repo=repo,
                         state=state,
-                    ),
-                    timeout=ORCHESTRATOR_TIMEOUT_S,
-                )
+                    )
+
+            await asyncio.wait_for(
+                _admitted_pipeline_body(),
+                timeout=ORCHESTRATOR_TIMEOUT_S,
+            )
 
         except asyncio.TimeoutError:
             logger.error(
