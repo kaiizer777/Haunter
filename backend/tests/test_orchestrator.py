@@ -27,8 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Repo, Run, RunStep, User
 from app.orchestrator import (
+    ORCHESTRATOR_MAX_CONCURRENT_PIPELINES,
     InvalidTransitionError,
     RunStatus,
+    _PIPELINE_SEMAPHORE,
+    _clamp_concurrent_pipelines,
     _transition,
     _validate_transition,
     check_fast_fail,
@@ -1035,3 +1038,42 @@ def test_fast_fail_does_not_trigger_on_repeated_context_gatherer_failure(
     assert reason == "non_llm_repeat"
     log_messages = [r.getMessage() for r in caplog.records]
     assert not any("fast-failing" in m for m in log_messages)
+
+# ---------------------------------------------------------------------------
+# Pipeline concurrency cap (feat-251, issue #256)
+# ---------------------------------------------------------------------------
+
+
+def test_clamp_concurrent_pipelines_floors_at_one() -> None:
+    assert _clamp_concurrent_pipelines(0) == 1
+    assert _clamp_concurrent_pipelines(-3) == 1
+
+
+def test_clamp_concurrent_pipelines_passes_valid_through() -> None:
+    assert _clamp_concurrent_pipelines(1) == 1
+    assert _clamp_concurrent_pipelines(4) == 4
+
+
+def test_clamp_concurrent_pipelines_falls_back_on_garbage() -> None:
+    assert (
+        _clamp_concurrent_pipelines(None)
+        == ORCHESTRATOR_MAX_CONCURRENT_PIPELINES
+    )
+    assert (
+        _clamp_concurrent_pipelines("many")
+        == ORCHESTRATOR_MAX_CONCURRENT_PIPELINES
+    )
+
+
+@pytest.mark.anyio
+async def test_pipeline_semaphore_bounds_concurrency() -> None:
+    permits = _clamp_concurrent_pipelines(ORCHESTRATOR_MAX_CONCURRENT_PIPELINES)
+    assert permits >= 1
+    for _ in range(permits):
+        await _PIPELINE_SEMAPHORE.acquire()
+    try:
+        assert _PIPELINE_SEMAPHORE.locked()
+    finally:
+        for _ in range(permits):
+            _PIPELINE_SEMAPHORE.release()
+    assert not _PIPELINE_SEMAPHORE.locked()
