@@ -1276,6 +1276,32 @@ async def test_auditor_fenced_fix_phrase_stays_quiet(
 
 
 @pytest.mark.asyncio
+async def test_auditor_fenced_mention_does_not_suppress_real_fix(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """A fenced auditor token never suppresses a real fix outside the fence."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = pure_issue_comment_payload(
+        body="```\n@haunter-auditor audit this\n```\n@haunter fix the crash",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issue_comment", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert len(root_runs(audit_store, repo)) == 1
+    # The normal picked-up ack fires; the lightweight helpful comment does not.
+    mock_ack.assert_awaited_once()
+    assert "picked up" in mock_ack.await_args.kwargs["body"]
+    assert _AUDITOR_HELP_BODY not in mock_ack.await_args.kwargs["body"]
+
+
+@pytest.mark.asyncio
 async def test_auditor_exact_phrase_unauthorized_posts_nothing(
     client: httpx.AsyncClient,
     fake_audit_db: FakeAsyncSession,

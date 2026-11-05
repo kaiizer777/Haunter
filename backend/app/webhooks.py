@@ -2393,9 +2393,10 @@ async def _handle_issue_trigger(
     # passed, so unauthorized/bot authors and disabled repos never reach it
     # (no comment, no Run). Gate 1 is lexical-only -- it fires on
     # `@haunter-auditor` -- so auditor comments arrive here. Mention
-    # detection stays case-insensitive on the raw text; the fix phrase
-    # (case-sensitive) and the audit check both run on fence-stripped text
-    # so pasted code blocks can never fire the pipeline. Precedence: mixed
+    # detection stays case-insensitive but runs on the fence-stripped text,
+    # like the fix phrase (case-sensitive) and the audit check, so a fenced
+    # auditor token can neither fire the pipeline nor suppress a real
+    # `@haunter` fix outside the fence. Precedence: mixed
     # -> ambiguous comment; pure fix phrase -> fall through to minting;
     # manual audit -> existing outcome (ignored, no comment); plain mention
     # -> helpful comment; otherwise the legacy `@haunter`/`/fix` path below
@@ -2403,7 +2404,7 @@ async def _handle_issue_trigger(
     stripped_trigger = _strip_fenced_code(
         trigger_text if isinstance(trigger_text, str) else ""
     )
-    auditor_mention = has_auditor_mention(trigger_text)
+    auditor_mention = has_auditor_mention(stripped_trigger)
     manual_audit = audit_pipeline.is_manual_audit_comment(stripped_trigger)
     fix_phrase = is_auditor_fix_trigger(stripped_trigger)
     if auditor_mention or manual_audit or fix_phrase:
