@@ -154,6 +154,8 @@ AUDITOR_FIX_FALSE_CASES: list[str] = [
     "@haunter-auditor fixx this issue",
     "@haunter-auditorfix this issue",
     "@haunter-auditor fix this issu",
+    "@haunter-auditor fix this issues",
+    "@haunter-auditor fix this issuex",
     "@haunter",
     "@haunter-auditor",
     "@haunter-auditor please help",
