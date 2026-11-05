@@ -105,6 +105,29 @@ def test_auditor_mention_non_string_is_no_op(body: Any) -> None:
     assert has_auditor_mention(body) is False
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "is this safe @haunter-auditor",
+        "hey @haunter-auditor.",
+        "line one\n@haunter-auditor\nline three",
+    ],
+)
+def test_auditor_mention_placement_triggers(body: str) -> None:
+    assert has_auditor_mention(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@haunter-auditor-bot please check",
+        "@haunter-auditor_audit this",
+    ],
+)
+def test_auditor_mention_placement_boundary_ignored(body: str) -> None:
+    assert has_auditor_mention(body) is False
+
+
 def test_extract_auditor_question_strips_mention() -> None:
     q = _extract_auditor_question("@haunter-auditor[bot]  explain this hunk?  ")
     assert "haunter-auditor" not in q.lower()
