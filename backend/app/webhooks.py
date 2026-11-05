@@ -2160,14 +2160,25 @@ async def _post_auditor_helpful_comment(
     issue_number: int,
     token: str,
     kind: str,
+    enable_pr_comments: bool,
 ) -> None:
     """Post the lightweight auditor reply on an issue (best-effort).
 
     `kind` is `"help"` or `"ambiguous"`. Runs only after the GitHub token
     is resolved; any post failure is logged and swallowed so the delivery
     itself still stands, mirroring `_post_issue_trigger_ack`. Unknown
-    `kind` values fall back to the generic help body.
+    `kind` values fall back to the generic help body. Like every other bot
+    comment path, suppressed outright when the repo disables
+    `enable_pr_comments`.
     """
+    if not enable_pr_comments:
+        logger.info(
+            "Auditor helpful comment suppressed for %s/%s#%d: pr_comments disabled",
+            repo.owner,
+            repo.name,
+            issue_number,
+        )
+        return
     from app import github_client
 
     body = (
@@ -2412,7 +2423,9 @@ async def _handle_issue_trigger(
         # both the fix pipeline and a read-only audit from one comment
         # would be ambiguous, so neither runs.
         if fix_phrase and manual_audit:
-            await _post_auditor_helpful_comment(repo, issue_number, token, "ambiguous")
+            await _post_auditor_helpful_comment(
+                repo, issue_number, token, "ambiguous", enable_issue_ack
+            )
             return {"status": "ignored", "reason": "ambiguous auditor request"}
         # 2. Pure fix phrase: fall through to the minting path below.
         if not fix_phrase:
@@ -2423,7 +2436,9 @@ async def _handle_issue_trigger(
                     "reason": "auditor mention, not a fix request",
                 }
             # 4. Plain mention: lightweight helpful comment, no Run.
-            await _post_auditor_helpful_comment(repo, issue_number, token, "help")
+            await _post_auditor_helpful_comment(
+                repo, issue_number, token, "help", enable_issue_ack
+            )
             return {
                 "status": "ignored",
                 "reason": "auditor mention, not a fix request",

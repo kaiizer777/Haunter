@@ -171,6 +171,7 @@ async def seed_repo(
     owner: str = OWNER,
     repo_name: str = REPO,
     enable_auto_fix: bool | None = None,
+    enable_pr_comments: bool | None = None,
 ) -> Repo:
     """Register a repo with no runs yet — issue triggers mint root runs."""
     user = await user_factory(
@@ -180,8 +181,13 @@ async def seed_repo(
     repo = Repo(user_id=user.id, owner=owner, name=repo_name)
     session.add(repo)
     await session.commit()
+    settings_kwargs: dict[str, Any] = {}
     if enable_auto_fix is not None:
-        session.add(RepoSettings(repo_id=repo.id, enable_auto_fix=enable_auto_fix))
+        settings_kwargs["enable_auto_fix"] = enable_auto_fix
+    if enable_pr_comments is not None:
+        settings_kwargs["enable_pr_comments"] = enable_pr_comments
+    if settings_kwargs:
+        session.add(RepoSettings(repo_id=repo.id, **settings_kwargs))
         await session.commit()
     return repo
 
@@ -1396,7 +1402,9 @@ async def test_auditor_helpful_comment_post_failure_is_swallowed():
         side_effect=RuntimeError("github down"),
     ):
         assert (
-            await _post_auditor_helpful_comment(repo, ISSUE_NUMBER, "tok", "help")
+            await _post_auditor_helpful_comment(
+            repo, ISSUE_NUMBER, "tok", "help", True
+        )
             is None
         )
 
@@ -1411,11 +1419,66 @@ async def test_auditor_helpful_comment_unknown_kind_falls_back_to_help():
         "app.github_client.create_issue_comment", new_callable=AsyncMock
     ) as mock_post:
         assert (
-            await _post_auditor_helpful_comment(repo, ISSUE_NUMBER, "tok", "bogus")
+            await _post_auditor_helpful_comment(
+            repo, ISSUE_NUMBER, "tok", "bogus", True
+        )
             is None
         )
     mock_post.assert_awaited_once()
     assert "issue" in mock_post.await_args.kwargs["body"]
+
+@pytest.mark.asyncio
+async def test_auditor_helpful_comment_suppressed_when_pr_comments_disabled():
+    """The kill switch suppresses the lightweight reply (no post attempt)."""
+    from app.webhooks import _post_auditor_helpful_comment
+
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    with patch(
+        "app.github_client.create_issue_comment", new_callable=AsyncMock
+    ) as mock_post:
+        assert (
+            await _post_auditor_helpful_comment(
+                repo, ISSUE_NUMBER, "tok", "help", False
+            )
+            is None
+        )
+        assert (
+            await _post_auditor_helpful_comment(
+                repo, ISSUE_NUMBER, "tok", "ambiguous", False
+            )
+            is None
+        )
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_plain_mention_posts_nothing_when_pr_comments_disabled(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Plain mention + pr_comments disabled: ignored, no Run, no comment."""
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, enable_pr_comments=False
+    )
+    payload = issues_opened_payload(
+        title="@haunter-auditor what does this failure mean?",
+        body="is this flaky?",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "auditor mention, not a fix request",
+    }
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Auditor fix-phrase router placement (feat-251, issue #256)
