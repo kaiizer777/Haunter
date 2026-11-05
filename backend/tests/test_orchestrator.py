@@ -1073,6 +1073,14 @@ async def test_pipeline_semaphore_bounds_concurrency() -> None:
         await _PIPELINE_SEMAPHORE.acquire()
     try:
         assert _PIPELINE_SEMAPHORE.locked()
+        blocked = asyncio.create_task(_PIPELINE_SEMAPHORE.acquire())
+        try:
+            await asyncio.sleep(0)
+            assert not blocked.done()
+        finally:
+            blocked.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await blocked
     finally:
         for _ in range(permits):
             _PIPELINE_SEMAPHORE.release()

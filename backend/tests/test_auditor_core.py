@@ -6877,5 +6877,6 @@ async def test_run_audit_caps_total_perspective_fan_out_at_four():
         enable_holistic=True,
     )
 
-    assert len(result.perspectives) <= 4
-    assert len(seen) <= 4
+    assert len(result.perspectives) == 4
+    assert len(seen) == 4
+    assert set(seen) == {"security", "correctness", "performance", "holistic"}
