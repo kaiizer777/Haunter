@@ -15,6 +15,8 @@ from app.services.followup_commands import (
     FEEDBACK_CONCLUSION,
     FOLLOWUP_COMMANDS,
     TEST_FIX_CONCLUSION,
+    has_auditor_fix_trigger,
+    is_auditor_fix_trigger,
     parse_followup_command,
 )
 
@@ -122,3 +124,63 @@ def test_conclusion_constants_match_pipeline_contract() -> None:
     assert FEEDBACK_CONCLUSION == "feedback"
     assert TEST_FIX_CONCLUSION == "test-fix"
     assert FEEDBACK_CONCLUSION != TEST_FIX_CONCLUSION
+
+
+#: Bodies where the strict auditor fix-trigger phrase appears outside fenced
+#: code and must fire.
+AUDITOR_FIX_TRUE_CASES: list[str] = [
+    "@haunter-auditor fix this issue",
+    "@haunter-auditor fix this issue.",
+    "@haunter-auditor fix this issue!",
+    "@haunter-auditor fix this issue please take a look",
+    "please @haunter-auditor fix this issue thanks",
+]
+
+
+@pytest.mark.parametrize("body", AUDITOR_FIX_TRUE_CASES)
+def test_auditor_fix_trigger_true_cases(body: str) -> None:
+    assert is_auditor_fix_trigger(body) is True
+    assert has_auditor_fix_trigger(body) is True
+
+
+#: Bodies that must never fire the auditor fix trigger: case variations,
+#: extra letters, bare mentions, the [bot] suffix form, and the phrase
+#: confined to fenced code.
+AUDITOR_FIX_FALSE_CASES: list[str] = [
+    "@Haunter-Auditor Fix This Issue",
+    "@HAUNTER-AUDITOR FIX THIS ISSUE",
+    "@haunter-Auditor fix this issue",
+    "@haunter-auditors fix this issue",
+    "@haunter-auditor fixx this issue",
+    "@haunter-auditorfix this issue",
+    "@haunter-auditor fix this issu",
+    "@haunter",
+    "@haunter-auditor",
+    "@haunter-auditor please help",
+    "@haunter fix this issue",
+    "@haunter-auditor[bot] fix this issue",
+    "```\n@haunter-auditor fix this issue\n```",
+    "```@haunter-auditor fix this issue```",
+    "```\n@haunter-auditor fix this issue",
+    "~~~\n@haunter-auditor fix this issue\n~~~",
+    "hello\n```\n@haunter-auditor fix this issue\n```\nbye",
+]
+
+
+@pytest.mark.parametrize("body", AUDITOR_FIX_FALSE_CASES)
+def test_auditor_fix_trigger_false_cases(body: str) -> None:
+    assert is_auditor_fix_trigger(body) is False
+    assert has_auditor_fix_trigger(body) is False
+
+
+def test_auditor_fix_trigger_non_string_and_empty() -> None:
+    assert is_auditor_fix_trigger(None) is False
+    assert is_auditor_fix_trigger("") is False
+    assert is_auditor_fix_trigger(1234) is False  # type: ignore[arg-type]
+    assert is_auditor_fix_trigger(["@haunter-auditor fix this issue"]) is False  # type: ignore[arg-type]
+    assert has_auditor_fix_trigger(None) is False
+    assert has_auditor_fix_trigger("") is False
+
+
+def test_auditor_fix_trigger_alias() -> None:
+    assert has_auditor_fix_trigger is is_auditor_fix_trigger
