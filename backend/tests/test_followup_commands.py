@@ -184,3 +184,38 @@ def test_auditor_fix_trigger_non_string_and_empty() -> None:
 
 def test_auditor_fix_trigger_alias() -> None:
     assert has_auditor_fix_trigger is is_auditor_fix_trigger
+
+
+#: Fence-edge placements where the phrase stays visible and must fire: the
+#: phrase after a closed fence, the phrase before an unclosed fence opens, a
+#: 4-space-indented fence marker (CommonMark literal text, not a fence), and
+#: an inline single-backtick span (only 3+ runs fence).
+AUDITOR_FIX_FENCE_EDGE_TRUE_CASES: list[str] = [
+    "```\ncode\n```\n@haunter-auditor fix this issue",
+    "@haunter-auditor fix this issue\n```\ncode",
+    "    ```\n@haunter-auditor fix this issue\n    ```",
+    "`@haunter-auditor fix this issue`",
+]
+
+
+@pytest.mark.parametrize("body", AUDITOR_FIX_FENCE_EDGE_TRUE_CASES)
+def test_auditor_fix_trigger_fence_edge_visible_cases(body: str) -> None:
+    assert is_auditor_fix_trigger(body) is True
+    assert has_auditor_fix_trigger(body) is True
+
+
+#: Fence-open/close variations where the phrase stays hidden and must not
+#: fire: an info-string opener, a 1-3-space indented fence, a short run
+#: that never closes a longer block, and a mismatched closing character.
+AUDITOR_FIX_FENCE_EDGE_FALSE_CASES: list[str] = [
+    "```python\n@haunter-auditor fix this issue\n```",
+    "   ```\n@haunter-auditor fix this issue\n   ```",
+    "````\n@haunter-auditor fix this issue\n```\n````",
+    "~~~\n@haunter-auditor fix this issue\n```",
+]
+
+
+@pytest.mark.parametrize("body", AUDITOR_FIX_FENCE_EDGE_FALSE_CASES)
+def test_auditor_fix_trigger_fence_edge_hidden_cases(body: str) -> None:
+    assert is_auditor_fix_trigger(body) is False
+    assert has_auditor_fix_trigger(body) is False
