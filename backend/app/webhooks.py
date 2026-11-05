@@ -2133,6 +2133,63 @@ async def _post_issue_trigger_ack(
         )
 
 
+#: Lightweight replies for auditor mentions on issues (feat-251, v1). No
+#: LLM, no thread fetch, no Run -- a single best-effort comment. The Q&A
+#: route still owns PR comments; these bodies are issue-only.
+_AUDITOR_HELP_COMMENT_BODY = (
+    "I can help with this issue, or run an audit with "
+    "'@haunter-auditor audit'. To trigger a fix PR, comment exactly "
+    "'@haunter-auditor fix this issue'."
+)
+
+#: Posted when a comment carries both the exact fix phrase and an audit
+#: request: firing both a fix pipeline and a read-only audit from one
+#: comment would be ambiguous, so neither runs.
+_AUDITOR_AMBIGUOUS_COMMENT_BODY = (
+    "That request looks ambiguous -- it asks me to both fix this issue "
+    "and run an audit. Please send one at a time: comment exactly "
+    "'@haunter-auditor fix this issue' to trigger a fix PR, or "
+    "'@haunter-auditor audit ...' to run a read-only audit."
+)
+
+
+async def _post_auditor_helpful_comment(
+    repo: Repo,
+    issue_number: int,
+    token: str,
+    kind: str,
+) -> None:
+    """Post the lightweight auditor reply on an issue (best-effort).
+
+    `kind` is `"help"` or `"ambiguous"`. Runs only after the GitHub token
+    is resolved; any post failure is logged and swallowed so the delivery
+    itself still stands, mirroring `_post_issue_trigger_ack`.
+    """
+    from app import github_client
+
+    body = (
+        _AUDITOR_AMBIGUOUS_COMMENT_BODY if kind == "ambiguous"
+        else _AUDITOR_HELP_COMMENT_BODY
+    )
+    try:
+        await github_client.create_issue_comment(
+            owner=repo.owner,
+            repo=repo.name,
+            issue_number=issue_number,
+            body=body,
+            token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor helpful comment failed for %s/%s#%d (kind=%s, %s) -- delivery stands",
+            repo.owner,
+            repo.name,
+            issue_number,
+            kind,
+            type(exc).__name__,
+        )
+
+
 async def _handle_issue_trigger(
     db: AsyncSession,
     background_tasks: BackgroundTasks,
