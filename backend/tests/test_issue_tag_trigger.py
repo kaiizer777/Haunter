@@ -1390,3 +1390,65 @@ async def test_auditor_helpful_comment_unknown_kind_falls_back_to_help():
         )
     mock_post.assert_awaited_once()
     assert "issue" in mock_post.await_args.kwargs["body"]
+
+# ---------------------------------------------------------------------------
+# Auditor fix-phrase router placement (feat-251, issue #256)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auditor_fix_phrase_in_body_mints_a_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Body-only fix phrase on issues.opened takes the pure-phrase mint path."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="Crash on empty config",
+        body="Still broken. @haunter-auditor fix this issue please.",
+    )
+
+    resp, _, mock_sha, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert data["issue_number"] == ISSUE_NUMBER
+    runs = root_runs(audit_store, repo)
+    assert len(runs) == 1
+    assert runs[0].trigger_comment_id is None
+    assert runs[0].reply_to_comment_id == ISSUE_NUMBER
+    mock_sha.assert_called_once()
+    mock_ack.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_auditor_fix_phrase_after_fence_comment_fires(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Fix phrase after a closed fence in an issue comment fires (R5)."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = pure_issue_comment_payload(
+        body="```\nlog output\n```\n@haunter-auditor fix this issue",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issue_comment", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert data["issue_number"] == ISSUE_NUMBER
+    runs = root_runs(audit_store, repo)
+    assert len(runs) == 1
+    assert runs[0].trigger_comment_id == TRIGGER_COMMENT_ID
+    assert runs[0].reply_to_comment_id == ISSUE_NUMBER
+    mock_ack.assert_called_once()
