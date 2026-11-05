@@ -1169,6 +1169,7 @@ async def test_auditor_plain_mention_posts_helpful_comment(
     assert root_runs(audit_store, repo) == []
     mock_ack.assert_awaited_once()
     assert mock_ack.await_args.kwargs["body"] == _AUDITOR_HELP_BODY
+    assert "issue" in mock_ack.await_args.kwargs["body"]
 
 
 @pytest.mark.asyncio
@@ -1351,3 +1352,41 @@ async def test_auditor_exact_phrase_repo_disabled_posts_nothing(
     assert "auto_fix" in data["reason"]
     assert root_runs(audit_store, repo) == []
     mock_ack.assert_not_called()
+
+# ---------------------------------------------------------------------------
+# Auditor helpful-comment helper, direct unit cover (feat-251, issue #255)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_auditor_helpful_comment_post_failure_is_swallowed():
+    """A failing comment post never fails the delivery (best-effort)."""
+    from app.webhooks import _post_auditor_helpful_comment
+
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    with patch(
+        "app.github_client.create_issue_comment",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("github down"),
+    ):
+        assert (
+            await _post_auditor_helpful_comment(repo, ISSUE_NUMBER, "tok", "help")
+            is None
+        )
+
+
+@pytest.mark.asyncio
+async def test_auditor_helpful_comment_unknown_kind_falls_back_to_help():
+    """Unknown kinds post the generic help body (documented fallback)."""
+    from app.webhooks import _post_auditor_helpful_comment
+
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    with patch(
+        "app.github_client.create_issue_comment", new_callable=AsyncMock
+    ) as mock_post:
+        assert (
+            await _post_auditor_helpful_comment(repo, ISSUE_NUMBER, "tok", "bogus")
+            is None
+        )
+    mock_post.assert_awaited_once()
+    assert "issue" in mock_post.await_args.kwargs["body"]
