@@ -1003,3 +1003,351 @@ async def test_gather_issue_context_passes_repo_name_to_comment_fetch():
     assert call_kwargs["budget"] is not None
     assert "still broken on main" in captured["issue_block"]
     assert "@reporter" in captured["issue_block"]
+
+# ---------------------------------------------------------------------------
+# Auditor fix-trigger routing (feat-251, issue #254)
+# ---------------------------------------------------------------------------
+
+_AUDITOR_HELP_BODY = (
+    "I can help with this issue, or run an audit with "
+    "'@haunter-auditor audit'. To trigger a fix PR, comment exactly "
+    "'@haunter-auditor fix this issue'."
+)
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_fix_phrase_mints_a_fix_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Pure exact phrase on issues.opened mints a root Run (no helpful comment)."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="Steps: crash on empty config.",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert len(root_runs(audit_store, repo)) == 1
+    # The normal picked-up ack fires; the lightweight helpful comment does not.
+    mock_ack.assert_awaited_once()
+    assert "picked up" in mock_ack.await_args.kwargs["body"]
+    assert _AUDITOR_HELP_BODY not in mock_ack.await_args.kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_fix_phrase_title_only_mints_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Title-only phrase mints a Run (trigger text = title when body is empty)."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="",
+    )
+
+    resp, _, _, _ = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert len(root_runs(audit_store, repo)) == 1
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_fix_phrase_on_pure_issue_comment_mints_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Pure-issue issue_comment with trailing prose still mints (substring rule)."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = pure_issue_comment_payload(
+        body="@haunter-auditor fix this issue please.",
+    )
+
+    resp, _, _, _ = await post_issue(
+        client, "issue_comment", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    rows = root_runs(audit_store, repo)
+    assert len(rows) == 1
+    assert rows[0].trigger_comment_id == TRIGGER_COMMENT_ID
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_fix_phrase_second_trigger_is_duplicate(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Redelivery/double-fire of the exact phrase dedupes on the existing Run."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="Steps: crash on empty config.",
+    )
+
+    first, _, _, _ = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+    second, _, _, _ = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert first.json()["status"] == "queued"
+    assert second.json()["status"] == "duplicate"
+    assert len(root_runs(audit_store, repo)) == 1
+
+
+@pytest.mark.asyncio
+async def test_auditor_mixed_phrase_and_audit_posts_ambiguous_comment(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Fix phrase + audit request: ambiguous comment only, no Run, no audit."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="@haunter-auditor audit this PR for regressions",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "ambiguous auditor request",
+    }
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_awaited_once()
+    assert "ambiguous" in mock_ack.await_args.kwargs["body"]
+
+
+@pytest.mark.asyncio
+async def test_auditor_plain_mention_posts_helpful_comment(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Non-trigger auditor mention on an issue: lightweight comment, no Run."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor what does this failure mean?",
+        body="is this flaky?",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "auditor mention, not a fix request",
+    }
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_awaited_once()
+    assert mock_ack.await_args.kwargs["body"] == _AUDITOR_HELP_BODY
+
+
+@pytest.mark.asyncio
+async def test_auditor_case_variant_posts_helpful_comment(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Case/letter variants never fire the case-sensitive phrase (helpful only)."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor Fix This Issue",
+        body="please look",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "auditor mention, not a fix request",
+    }
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_awaited_once()
+    assert mock_ack.await_args.kwargs["body"] == _AUDITOR_HELP_BODY
+
+
+@pytest.mark.asyncio
+async def test_auditor_noun_use_audit_plus_phrase_mints_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Noun-use `audit` (audit log) is not an audit request: pure fix mints."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="check the audit log for context",
+    )
+
+    resp, _, _, _ = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "queued"
+    assert len(root_runs(audit_store, repo)) == 1
+
+
+@pytest.mark.asyncio
+async def test_auditor_phrase_split_across_title_body_mints_no_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Phrase split across the title/body boundary is not contiguous: no Run."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this",
+        body="issue and more",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "auditor mention, not a fix request",
+    }
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_awaited_once()
+    assert mock_ack.await_args.kwargs["body"] == _AUDITOR_HELP_BODY
+
+
+@pytest.mark.asyncio
+async def test_auditor_fenced_fix_phrase_stays_quiet(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """A fenced exact phrase never fires: gate 1 strips fences first."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="Fenced report",
+        body="```\n@haunter-auditor fix this issue\n```",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ignored", "reason": "no issue trigger"}
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_phrase_unauthorized_posts_nothing(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """NONE author + exact phrase: ignored before the branch, no comment."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="Steps: crash.",
+        author_association="NONE",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ignored", "reason": "unauthorized commenter"}
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_phrase_from_bot_posts_nothing(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Bot sender + exact phrase: self-loop guard first, no comment, no Run."""
+    repo = await seed_repo(fake_audit_db, fake_audit_user_factory)
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="Steps: crash.",
+        login="haunter-bot",
+        sender_type="Bot",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ignored", "reason": "bot comment"}
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auditor_exact_phrase_repo_disabled_posts_nothing(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+):
+    """Disabled repo + exact phrase: kill-switch skips before the branch."""
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, enable_auto_fix=False
+    )
+    payload = issues_opened_payload(
+        title="@haunter-auditor fix this issue",
+        body="Steps: crash.",
+    )
+
+    resp, _, _, mock_ack = await post_issue(
+        client, "issues", payload, signature=signed(TEST_SECRET, payload)
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "skipped"
+    assert "auto_fix" in data["reason"]
+    assert root_runs(audit_store, repo) == []
+    mock_ack.assert_not_called()
