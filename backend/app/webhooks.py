@@ -116,7 +116,9 @@ from app.services import audit_pipeline, feature_enforcement
 from app.services.followup_commands import (
     FEEDBACK_CONCLUSION,
     TEST_FIX_CONCLUSION,
+    _strip_fenced_code,
     has_issue_trigger,
+    is_auditor_fix_trigger,
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
@@ -2234,18 +2236,12 @@ async def _handle_issue_trigger(
         )
         return {"status": "ignored", "reason": "no issue trigger"}
 
-    # 2. Auditor exclusivity (R5): auditor mentions belong to the read-only
-    # auditor, which cannot act on issues (no PR endpoints) — they must never
-    # mint a fix Run. Checked before any fix routing.
-    if has_auditor_mention(trigger_text) or audit_pipeline.is_manual_audit_comment(
-        trigger_text
-    ):
-        logger.info(
-            "Ignored %s (delivery_id=%s): auditor mention, not a fix request",
-            event,
-            delivery_id,
-        )
-        return {"status": "ignored", "reason": "auditor mention, not a fix request"}
+    # 2. Auditor routing lives post-guard (after token + kill-switch/cost
+    # gate, below): gate 1 is lexical-only, so auditor mentions still enter
+    # this function, and the three-way branch there decides -- mixed fix
+    # phrase + audit request -> ambiguous comment, pure fix phrase -> the
+    # existing minting path, manual audit -> existing outcome, plain mention
+    # -> lightweight helpful comment.
 
     # 3. Collaborator Authority: same allowlist as the PR-comment flow.
     if (author_association or "").upper() not in ALLOWED_AUTHOR_ASSOCIATIONS:
@@ -2391,6 +2387,46 @@ async def _handle_issue_trigger(
             type(exc).__name__,
         )
         return {"status": "skipped", "reason": "github token unavailable"}
+
+    # 7b. Auditor branch (feat-251): runs only after every guard above has
+    # passed, so unauthorized/bot authors and disabled repos never reach it
+    # (no comment, no Run). Gate 1 is lexical-only -- it fires on
+    # `@haunter-auditor` -- so auditor comments arrive here. Mention
+    # detection stays case-insensitive on the raw text; the fix phrase
+    # (case-sensitive) and the audit check both run on fence-stripped text
+    # so pasted code blocks can never fire the pipeline. Precedence: mixed
+    # -> ambiguous comment; pure fix phrase -> fall through to minting;
+    # manual audit -> existing outcome (ignored, no comment); plain mention
+    # -> helpful comment; otherwise the legacy `@haunter`/`/fix` path below
+    # is unchanged.
+    stripped_trigger = _strip_fenced_code(
+        trigger_text if isinstance(trigger_text, str) else ""
+    )
+    auditor_mention = has_auditor_mention(trigger_text)
+    manual_audit = audit_pipeline.is_manual_audit_comment(stripped_trigger)
+    fix_phrase = is_auditor_fix_trigger(stripped_trigger)
+    if auditor_mention or manual_audit or fix_phrase:
+        # 1. Mixed: the exact fix phrase plus an audit request. Firing
+        # both the fix pipeline and a read-only audit from one comment
+        # would be ambiguous, so neither runs.
+        if fix_phrase and manual_audit:
+            await _post_auditor_helpful_comment(repo, issue_number, token, "ambiguous")
+            return {"status": "ignored", "reason": "ambiguous auditor request"}
+        # 2. Pure fix phrase: fall through to the minting path below.
+        if not fix_phrase:
+            # 3. Manual audit keeps its existing outcome (ignored, no comment).
+            if manual_audit:
+                return {
+                    "status": "ignored",
+                    "reason": "auditor mention, not a fix request",
+                }
+            # 4. Plain mention: lightweight helpful comment, no Run.
+            await _post_auditor_helpful_comment(repo, issue_number, token, "help")
+            return {
+                "status": "ignored",
+                "reason": "auditor mention, not a fix request",
+            }
+
     base_branch = repo.default_branch or "main"
     try:
         head_sha = await github_client.fetch_branch_sha(
