@@ -828,7 +828,12 @@ def test_apply_unified_diff_tolerates_trailing_whitespace() -> None:
 
 
 def test_apply_unified_diff_tolerates_crlf_target() -> None:
-    """An LF-authored hunk applies to a CRLF target file (issue #270)."""
+    """An LF-authored hunk applies to a CRLF target file (issue #270).
+
+    The applier preserves the target file's own CRLF endings (issue #272):
+    context/deletion lines are emitted verbatim from the target and added
+    lines use the target's newline style, so the result stays CRLF.
+    """
     original = "# Title\r\nbody line\r\n"
     file_patch = (
         "--- a/README.md\n"
@@ -837,14 +842,74 @@ def test_apply_unified_diff_tolerates_crlf_target() -> None:
         " # Title\n"
         "-body line\n"
     )
-    assert _apply_unified_diff_to_content(original, file_patch) == "# Title\n"
+    assert _apply_unified_diff_to_content(original, file_patch) == "# Title\r\n"
+
+
+def test_apply_unified_diff_preserves_crlf_round_trip() -> None:
+    """CRLF in, CRLF out: added lines use the target's newline style."""
+    original = "a\r\nb\r\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB\r\n"
+
+
+def test_apply_unified_diff_preserves_lf_round_trip() -> None:
+    """LF guard: LF targets keep LF endings after the fix (no regression)."""
+    original = "a\nb\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB\n"
+
+
+def test_apply_unified_diff_preserves_no_newline_eof_crlf() -> None:
+    """A CRLF file without trailing newline keeps an unterminated EOF."""
+    original = "a\r\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB"
+
+
+def test_apply_unified_diff_preserves_no_newline_eof_lf() -> None:
+    """An LF file without trailing newline keeps an unterminated EOF."""
+    original = "a\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB"
 
 
 def test_apply_unified_diff_applies_no_newline_marker() -> None:
     """A patch ending with '\\ No newline at end of file' applies (issue #270).
 
     The marker is content-neutral — skipped exactly like app.diff_validation
-    skips it — and never leaks into the applied content.
+    skips it — and never leaks into the applied content. It describes the
+    preceding '+' line, so the unterminated EOF of the original is
+    preserved in the result (issue #272) instead of gaining a newline.
     """
     original = "line1\nline2"
     file_patch = (
@@ -856,7 +921,7 @@ def test_apply_unified_diff_applies_no_newline_marker() -> None:
         "+LINE2\n"
         "\\ No newline at end of file\n"
     )
-    assert _apply_unified_diff_to_content(original, file_patch) == "line1\nLINE2\n"
+    assert _apply_unified_diff_to_content(original, file_patch) == "line1\nLINE2"
 
 
 @pytest.mark.anyio
