@@ -81,6 +81,10 @@ _BRANCH_RE: re.Pattern[str] = re.compile(r"^[a-zA-Z0-9/_\-\.]+$")
 # Maximum branch name length (GitHub hard limit is 250 bytes; we enforce 255 chars).
 _BRANCH_MAX_LEN = 255
 
+# Unified-diff end-of-file marker. Content-neutral: skipped by both this
+# module's applier and app.diff_validation's counter (same literal).
+_NO_NEWLINE_MARKER = "\\ No newline at end of file"
+
 # Protected base branches — Haunter must never push directly to these.
 # Single source of truth imported from app.schemas.
 _PROTECTED_BRANCHES: frozenset[str] = _PROTECTED_BRANCHES
@@ -1149,8 +1153,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     # Addition — insert
                     new_lines.append(hunk_line[1:])
                     new_remaining -= 1
-                elif hunk_line.startswith("\\"):
-                    # No newline at end of file marker — ignore
+                elif hunk_line == _NO_NEWLINE_MARKER or hunk_line.startswith("\\"):
+                    # "\ No newline at end of file" marker — content-neutral,
+                    # skipped exactly like app.diff_validation does (it is not
+                    # a content line and never touches hunk counts).
                     pass
                 elif hunk_line == "":
                     # Empty line treated as context of empty string (rare)
