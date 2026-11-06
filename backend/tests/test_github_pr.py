@@ -808,6 +808,178 @@ def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
     assert _apply_unified_diff_to_content(original, file_patch) == "A\nb\nC\nd\n"
 
 
+def test_apply_unified_diff_tolerates_trailing_whitespace() -> None:
+    """Whitespace-only drift between hunk and target must not fail closed.
+
+    Regression test for issue #270 (run 803f0565): the model-authored hunk
+    matched the target file except for trailing whitespace, so the strict
+    PR applier returned None while the fuzzy sandbox mirror passed.
+    Committed output still comes from the target file's own lines.
+    """
+    original = "# Title   \nbody line  \n"
+    file_patch = (
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,1 @@\n"
+        " # Title\n"
+        "-body line\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "# Title   \n"
+
+
+def test_apply_unified_diff_tolerates_crlf_target() -> None:
+    """An LF-authored hunk applies to a CRLF target file (issue #270).
+
+    The applier preserves the target file's own CRLF endings (issue #272):
+    context/deletion lines are emitted verbatim from the target and added
+    lines use the target's newline style, so the result stays CRLF.
+    """
+    original = "# Title\r\nbody line\r\n"
+    file_patch = (
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,1 @@\n"
+        " # Title\n"
+        "-body line\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "# Title\r\n"
+
+
+def test_apply_unified_diff_preserves_crlf_round_trip() -> None:
+    """CRLF in, CRLF out: added lines use the target's newline style."""
+    original = "a\r\nb\r\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB\r\n"
+
+
+def test_apply_unified_diff_preserves_lf_round_trip() -> None:
+    """LF guard: LF targets keep LF endings after the fix (no regression)."""
+    original = "a\nb\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB\n"
+
+
+def test_apply_unified_diff_preserves_no_newline_eof_crlf() -> None:
+    """A CRLF file without trailing newline keeps an unterminated EOF."""
+    original = "a\r\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB"
+
+
+def test_apply_unified_diff_preserves_no_newline_eof_lf() -> None:
+    """An LF file without trailing newline keeps an unterminated EOF."""
+    original = "a\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB"
+
+
+def test_apply_unified_diff_applies_no_newline_marker() -> None:
+    """A patch ending with '\\ No newline at end of file' applies (issue #270).
+
+    The marker is content-neutral — skipped exactly like app.diff_validation
+    skips it — and never leaks into the applied content. It describes the
+    preceding '+' line, so the unterminated EOF of the original is
+    preserved in the result (issue #272) instead of gaining a newline.
+    """
+    original = "line1\nline2"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+LINE2\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "line1\nLINE2"
+
+
+@pytest.mark.anyio
+async def test_commit_patch_genuine_mismatch_raises_with_zero_writes() -> None:
+    """Content mismatch beyond whitespace still fails closed (issue #270).
+
+    Normalization must not turn the applier into a fuzzy matcher: a hunk
+    whose content genuinely differs from the target raises and performs
+    zero blob/tree/commit writes.
+    """
+    import base64
+
+    mismatched_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-totally-different-content\n"
+        "+new-content\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/app.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"actual-content\n").decode("ascii")},
+            )
+        )
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+
+        with pytest.raises(GitHubPRValidationError, match="does not match"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=mismatched_patch,
+                commit_msg="fix: something",
+                token="fake_token",
+            )
+
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not commit_route.called
+
+
 @pytest.mark.anyio
 async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
     """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
@@ -922,6 +1094,77 @@ async def test_commit_patch_with_deletion_mismatched_hunk_raises() -> None:
     assert not blob_route.called
     assert not tree_route.called
     assert not commit_route.called
+
+
+@pytest.mark.anyio
+async def test_commit_patch_multifile_mismatch_writes_no_tree_or_commit() -> None:
+    """A mismatch in a later file still fails closed at the commit boundary.
+
+    `commit_patch` creates blobs per file inside the loop, so when the first
+    file applies and the second mismatches, the first file's blob may exist
+    as an unreferenced object — but no tree, commit, or ref update may
+    follow, so nothing lands on the branch (cubic review on PR #271).
+    """
+    import base64
+
+    multifile_patch = (
+        "--- a/good.py\n"
+        "+++ b/good.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/bad.py\n"
+        "+++ b/bad.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-totally-different-content\n"
+        "+new-content\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/good.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
+        rx.get("/repos/test-org/test-repo/contents/bad.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"actual-content\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+        ref_route = rx.patch(
+            "/repos/test-org/test-repo/git/refs/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "commit_sha"}}))
+
+        with pytest.raises(GitHubPRValidationError, match="does not match"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=multifile_patch,
+                commit_msg="fix: something",
+                token="fake_token",
+            )
+
+    assert not tree_route.called
+    assert not commit_route.called
+    assert not ref_route.called
 
 
 @pytest.mark.anyio
@@ -1232,3 +1475,59 @@ async def test_commit_patch_with_deletion_404_does_not_trigger_fallback() -> Non
     assert len(tree_entries) == 1
     assert tree_entries[0]["path"] == "hello.py"
     assert tree_entries[0]["sha"] == "blob_sha_hello"
+
+
+def test_apply_unified_diff_no_newline_marker_at_true_hunk_end_strips() -> None:
+    """A marker after '+' at the true end of the hunk strips the newline."""
+    original = "a\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB"
+
+
+def test_apply_unified_diff_no_newline_marker_mid_hunk_ignored() -> None:
+    """A marker with hunk content following it is ignored (no concatenation).
+
+    Malformed model output placing the EOF marker mid-hunk must not strip
+    the preceding '+' line: stripping would concatenate it with the next
+    added line in the committed content.
+    """
+    original = "a\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,1 +1,3 @@\n"
+        " a\n"
+        "+b\n"
+        "\\ No newline at end of file\n"
+        "+c\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nb\nc\n"
+
+
+def test_apply_unified_diff_many_no_newline_markers_linear() -> None:
+    """Many markers in one hunk: only the trailing marker strips (cubic P2).
+
+    Covers the O(1) hunk-end lookup: every non-final marker is mid-hunk
+    (ignored, newlines kept) and only the marker at the true hunk end
+    strips. Deterministic correctness guard — no timing assert.
+    """
+    count = 200
+    body = "".join(
+        f"+L{k}\n\\ No newline at end of file\n" for k in range(count)
+    )
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        f"@@ -1,1 +1,{count} @@\n"
+        "-a\n" + body
+    )
+    expected = "".join(f"L{k}\n" for k in range(count - 1)) + f"L{count - 1}"
+    assert _apply_unified_diff_to_content("a", file_patch) == expected
