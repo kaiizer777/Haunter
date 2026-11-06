@@ -1206,13 +1206,27 @@ async def gather_issue_context(
     owner = repo.owner
     name = repo.name
 
+    token: Optional[str] = None
+    try:
+        from app.github.pr import get_installation_token
+
+        token = await get_installation_token(repo)
+    except Exception:
+        token = None
+
     issue_raw, comments_raw = await asyncio.gather(
         _safe_fetch(
-            gh.fetch_issue(owner=owner, repo=name, issue_number=issue_number),
+            gh.fetch_issue(
+                owner=owner,
+                repo=name,
+                issue_number=issue_number,
+                token=token,
+                allow_global_token=False,
+            ),
             label="issue",
         ),
         _safe_fetch(
-            _fetch_issue_discussion(owner, name, issue_number),
+            _fetch_issue_discussion(owner, name, issue_number, token=token),
             label="issue_comments",
         ),
     )
@@ -1246,7 +1260,11 @@ async def gather_issue_context(
 
     try:
         tree_paths = await gh.fetch_repo_tree_paths(
-            owner=owner, repo=name, sha=run.head_sha
+            owner=owner,
+            repo=name,
+            sha=run.head_sha,
+            token=token,
+            allow_global_token=False,
         )
     except Exception as exc:
         logger.warning(
