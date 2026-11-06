@@ -808,6 +808,113 @@ def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
     assert _apply_unified_diff_to_content(original, file_patch) == "A\nb\nC\nd\n"
 
 
+def test_apply_unified_diff_tolerates_trailing_whitespace() -> None:
+    """Whitespace-only drift between hunk and target must not fail closed.
+
+    Regression test for issue #270 (run 803f0565): the model-authored hunk
+    matched the target file except for trailing whitespace, so the strict
+    PR applier returned None while the fuzzy sandbox mirror passed.
+    Committed output still comes from the target file's own lines.
+    """
+    original = "# Title   \nbody line  \n"
+    file_patch = (
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,1 @@\n"
+        " # Title\n"
+        "-body line\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "# Title   \n"
+
+
+def test_apply_unified_diff_tolerates_crlf_target() -> None:
+    """An LF-authored hunk applies to a CRLF target file (issue #270)."""
+    original = "# Title\r\nbody line\r\n"
+    file_patch = (
+        "--- a/README.md\n"
+        "+++ b/README.md\n"
+        "@@ -1,2 +1,1 @@\n"
+        " # Title\n"
+        "-body line\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "# Title\n"
+
+
+def test_apply_unified_diff_applies_no_newline_marker() -> None:
+    """A patch ending with '\\ No newline at end of file' applies (issue #270).
+
+    The marker is content-neutral — skipped exactly like app.diff_validation
+    skips it — and never leaks into the applied content.
+    """
+    original = "line1\nline2"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " line1\n"
+        "-line2\n"
+        "+LINE2\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "line1\nLINE2\n"
+
+
+@pytest.mark.anyio
+async def test_commit_patch_genuine_mismatch_raises_with_zero_writes() -> None:
+    """Content mismatch beyond whitespace still fails closed (issue #270).
+
+    Normalization must not turn the applier into a fuzzy matcher: a hunk
+    whose content genuinely differs from the target raises and performs
+    zero blob/tree/commit writes.
+    """
+    import base64
+
+    mismatched_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-totally-different-content\n"
+        "+new-content\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/app.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"actual-content\n").decode("ascii")},
+            )
+        )
+        blob_route = rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+
+        with pytest.raises(GitHubPRValidationError, match="does not match"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=mismatched_patch,
+                commit_msg="fix: something",
+                token="fake_token",
+            )
+
+    assert not blob_route.called
+    assert not tree_route.called
+    assert not commit_route.called
+
+
 @pytest.mark.anyio
 async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
     """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
