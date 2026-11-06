@@ -1081,14 +1081,22 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     Returns new_text on success, None if hunk context does not match (mismatch).
     Handles multiple hunks per file, context lines, additions, deletions.
     """
-    orig_lines = original_text.splitlines()
+    orig_lines = original_text.splitlines(keepends=True)
+    # Newline style comes from the target file so LF-authored hunks never
+    # convert a CRLF file (and vice versa for added lines).
+    nl = "\r\n" if "\r\n" in original_text else "\n"
     # Keep trailing newline info
-    had_trailing_newline = original_text.endswith("\n") if original_text else True
+    had_trailing_newline = (
+        original_text.endswith(("\r\n", "\n")) if original_text else True
+    )
 
     # Extract hunks: each @@ header + body lines
 
     hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
     lines = file_patch.splitlines()
+    has_no_newline_marker = any(
+        ln == _NO_NEWLINE_MARKER or ln.startswith("\\") for ln in lines
+    )
     # Skip file header lines (---/+++) until first @@
     hunk_start = None
     for i, ln in enumerate(lines):
@@ -1100,6 +1108,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     # Build new content by walking original lines and hunks
     new_lines: list[str] = []
     orig_idx = 0  # 0-based index into orig_lines
+    # Kind of the previous hunk body line (" ", "-", "+", or None).
+    # Only used to scope "\ No newline at end of file" to the line it
+    # describes (a '+' addition it terminates, or nothing after '-').
+    prev_kind: str | None = None
 
     i = hunk_start
     while i < len(lines):
@@ -1120,15 +1132,37 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                 orig_idx += 1
             old_remaining = old_len
             new_remaining = new_len
+            prev_kind = None
             i += 1
             # Process hunk body until next @@, EOF, or declared counts met.
             # A blank line between hunks belongs to no hunk: once the body
             # fulfills its counts the hunk ends, so stray lines can never
             # leak into the output as spurious context.
             while i < len(lines) and not lines[i].startswith("@@"):
+                hunk_line = lines[i]
+                if hunk_line == _NO_NEWLINE_MARKER or hunk_line.startswith("\\"):
+                    # "\ No newline at end of file" marker — content-neutral,
+                    # skipped exactly like app.diff_validation does (it is not
+                    # a content line and never touches hunk counts). Handled
+                    # before the counts check so a trailing marker is honored
+                    # even after the body fulfilled its counts. It describes
+                    # the immediately preceding content line: when that line
+                    # is a '+' addition, strip the newline just added so an
+                    # unterminated EOF is preserved. After '-' it describes
+                    # the skipped original line (nothing emitted); after ' '
+                    # the emitted original line already carries the
+                    # original's own (absent) ending.
+                    if prev_kind == "+" and new_lines:
+                        last = new_lines[-1]
+                        if last.endswith("\r\n"):
+                            new_lines[-1] = last[:-2]
+                        elif last.endswith("\n"):
+                            new_lines[-1] = last[:-1]
+                    prev_kind = None
+                    i += 1
+                    continue
                 if old_remaining <= 0 and new_remaining <= 0:
                     break
-                hunk_line = lines[i]
                 if hunk_line.startswith(" "):
                     # Context — must match original (whitespace-tolerant)
                     if (
@@ -1141,6 +1175,7 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     orig_idx += 1
                     old_remaining -= 1
                     new_remaining -= 1
+                    prev_kind = " "
                 elif hunk_line.startswith("-"):
                     # Deletion — must match original then skip
                     if (
@@ -1151,24 +1186,27 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         return None
                     orig_idx += 1
                     old_remaining -= 1
+                    prev_kind = "-"
                 elif hunk_line.startswith("+"):
-                    # Addition — insert
-                    new_lines.append(hunk_line[1:])
+                    # Addition — insert using the target file's newline
+                    # style so LF-authored hunks do not convert CRLF files.
+                    new_lines.append(hunk_line[1:] + nl)
                     new_remaining -= 1
-                elif hunk_line == _NO_NEWLINE_MARKER or hunk_line.startswith("\\"):
-                    # "\ No newline at end of file" marker — content-neutral,
-                    # skipped exactly like app.diff_validation does (it is not
-                    # a content line and never touches hunk counts).
-                    pass
+                    prev_kind = "+"
                 elif hunk_line == "":
-                    # Empty line treated as context of empty string (rare)
-                    if orig_idx < len(orig_lines) and orig_lines[orig_idx] == "":
-                        new_lines.append("")
+                    # Empty line treated as context of empty string (rare).
+                    # orig_lines carry keepends, so compare newline-stripped
+                    # but emit the original line with its own ending.
+                    if orig_idx < len(orig_lines) and orig_lines[
+                        orig_idx
+                    ].removesuffix("\r\n").removesuffix("\n") == "":
+                        new_lines.append(orig_lines[orig_idx])
                         orig_idx += 1
                     else:
-                        new_lines.append("")
+                        new_lines.append(nl)
                     old_remaining -= 1
                     new_remaining -= 1
+                    prev_kind = " "
                 else:
                     # Unknown prefix — bail
                     return None
@@ -1182,9 +1220,13 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
         new_lines.append(orig_lines[orig_idx])
         orig_idx += 1
 
-    result = "\n".join(new_lines)
-    if had_trailing_newline or result:
-        result += "\n"
+    result = "".join(new_lines)
+    if (
+        result
+        and not result.endswith(("\r\n", "\n"))
+        and (had_trailing_newline or not has_no_newline_marker)
+    ):
+        result += nl
     return result
 
 
