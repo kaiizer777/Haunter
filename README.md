@@ -1,6 +1,8 @@
 <div align="center">
 
-<h3>Your engineering team's autonomous AI agent.<br/>It reviews code, fixes findings & ships features — before you've opened your IDE.</h3>
+<h3>Your personal 24/7 GitHub bot.<br/>It reviews your PRs, fixes findings & heals CI — while you sleep.</h3>
+
+Open source, self-hosted, yours. Bring your own keys and point it at your repos — there is no hosted service and no signup.
 
 <br/>
 
@@ -12,6 +14,8 @@
 [![Sandbox](https://img.shields.io/badge/Sandbox-GitHub%20Actions%20CI-181717?style=flat-square&logo=githubactions)](https://github.com/features/actions)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue?style=flat-square)](LICENSE)
 
+*Self-host stack — you run the frontend + backend yourself and deploy on your own infra.*
+
 <br/>
 
 </div>
@@ -22,9 +26,9 @@
 
 <br/>
 
-## 🔍 PR & Devops Agent
+## 🔍 Your personal PR & DevOps bot
 
-Connect any GitHub repository and Haunter becomes a team member. Every pull request gets reviewed across four dimensions — with confident findings reported in the review.
+Fork this repo, point it at your GitHub repositories, and Haunter works for you around the clock. Every pull request gets reviewed across four dimensions — with confident findings reported in the review.
 
 <br/>
 
@@ -39,7 +43,7 @@ Connect any GitHub repository and Haunter becomes a team member. Every pull requ
 
 <br/>
 
-A failing workflow is just another kind of PR problem. Haunter reads the failure, traces it to the exact root cause, generates a patch, and runs it through an **ephemeral sandbox** (a real mirror repo on GitHub Actions) before proposing anything. No guessing. No noise. Just a clean fix PR.
+A failing workflow is just another kind of PR problem. Haunter reads the failure, traces it to the exact root cause, generates a patch, and runs it through a **sandbox mirror** (a real mirror repo on GitHub Actions, on your own infra) before proposing anything. No guessing. No noise. Just a clean fix PR.
 
 ```
 CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI  →  Fix PR opened
@@ -49,7 +53,7 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 
 <br/>
 
-**Governance presets** — configure per repository how aggressively Haunter acts:
+**Governance presets** — configure per repository in your own deployment, choosing how aggressively Haunter acts:
 
 | Preset | Behaviour |
 |:---|:---|
@@ -61,9 +65,53 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 
 ---
 
+## 🚀 Self-host quickstart
+
+Run the whole thing on your own machine in two terminals. Prerequisites: **Node 20+** and **Python 3.11**.
+
+**1. Clone it.**
+
+```
+git clone https://github.com/kaiizer777/Haunter.git
+cd Haunter
+```
+
+**2. Backend (terminal 1 — port 7555).**
+
+```
+cd backend
+cp .env.example .env   # then fill in your own keys: DATABASE_URL, GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET,
+                       # FRONTEND_URL, OPENCODE_ZEN_API_KEY, GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN
+python -m venv .venv
+.venv\Scripts\activate   # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 7555
+```
+
+**3. Frontend (terminal 2 — port 3011).**
+
+```
+cd frontend
+npm install
+npm run dev   # http://localhost:3011
+```
+
+**4. Point it at your repo.** Add a webhook on your GitHub repository targeting your backend URL (`POST /webhooks/github`, HMAC-signed with your `GITHUB_WEBHOOK_SECRET`). For local smoke tests, skip GitHub and fire the real pipeline directly:
+
+```
+cd backend
+python scripts/trigger_local_review.py --repo <owner>/<repo> --pr <number> --dry-run --secret devsecret
+```
+
+(A `queued` response means accepted — watch the uvicorn log for the pipeline run. `GITHUB_WEBHOOK_SECRET` in `backend/.env` must match the `--secret` value.)
+
+**Deploy yours when ready** — same code, your infra: backend on AWS Lambda, the dashboard SPA on Cloudflare Workers, Postgres on Neon. Your keys, your data, your bot, 24/7.
+
+---
+
 ## 📊 Full Audit Trail
 
-Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box.
+Every action Haunter takes is logged, timestamped, and surfaced on your local-first dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box, and the data lives in your own database.
 
 An **eval harness** with 20 golden fixtures lets you benchmark and compare quality across any configuration change.
 
@@ -73,6 +121,6 @@ An **eval harness** with 20 golden fixtures lets you benchmark and compare quali
 
 <div align="center">
 
-**Open source — [Apache License 2.0](LICENSE).** 
+**Open source — [Apache License 2.0](LICENSE).** Fork it, self-host it, make it yours.
 
 </div>
