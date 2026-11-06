@@ -249,6 +249,7 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
             return_value="token",
         ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock),
+        patch("app.github.pr.dry_run_patch_at_sha", new_callable=AsyncMock, return_value=None),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock),
         patch(
             "app.github.pr.open_pr",
