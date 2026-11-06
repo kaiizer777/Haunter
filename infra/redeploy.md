@@ -11,7 +11,7 @@
 | **Terraform working dir** | `C:\Users\bari2\Desktop\Haunter\infra\aws\` |
 | **AWS credentials** | `C:\Users\bari2\.aws\credentials`, picked up automatically. Do NOT export `AWS_ACCESS_KEY_ID` manually. |
 | **Secrets** | `infra/aws/terraform.tfvars` holds real secrets (GitHub PAT, provider API keys, Fernet key). **Never echo it to chat or logs. Never overwrite it.** It is gitignored on purpose. |
-| **Lambda function names** | `haunter` (main) and `haunter-audit-dispatcher` (**not** `audit_dispatcher` — that's the Terraform *resource* name, `lambda.tf:417`) |
+| **Lambda function names** | `haunter` (main) and `haunter-audit-dispatcher` (**not** `audit_dispatcher` — that's the Terraform *resource* name, `infra/aws/lambda.tf:453`) |
 | **Runtime / arch** | Python 3.11, `x86_64` (FastAPI + Mangum via Function URL) |
 | **Region** | `us-east-1` · **Account** `452258152602` |
 | **Lambda zip** | Built at repo root: `C:\Users\bari2\Desktop\Haunter\lambda.zip` |
