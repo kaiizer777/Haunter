@@ -133,9 +133,24 @@ class FixOutputTruncatedError(FixGenerationError):
 TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
 
 #: Output budget requested for fix-generation calls. _detect_truncation
-#: measures usage.output_tokens against this same value, so the inferred
-#: layer only fires when a reason-less response also fills the whole budget.
+#: measures usage.output_tokens against the effective provider budget, so the
+#: inferred layer only fires when a reason-less response also fills that budget.
 _FIX_MAX_TOKENS: int = 10_000_000
+#: Lowest per-provider output-token ceiling enforced in app/llm. The fix
+#: call requests _FIX_MAX_TOKENS but each provider applies its own clamp
+#: (groq.py: 8192, anthropic.py: 8192, openai.py: 16384, opencode_zen.py:
+#: settings ceiling), so the inferred layer compares usage against
+#: min(requested, this cap) instead of the unreachable raw request.
+_MIN_KNOWN_PROVIDER_OUTPUT_CAP: int = 8_192
+
+
+def _effective_max_tokens(requested: int) -> int:
+    """Budget the provider actually enforces for an output-token request.
+
+    code_reviewer needs no equivalent: REVIEW_MAX_TOKENS (4096) already
+    sits below every provider cap, so requested == applied there.
+    """
+    return min(requested, _MIN_KNOWN_PROVIDER_OUTPUT_CAP)
 
 
 def _reported_finish_reason(response: dict) -> Optional[str]:
@@ -294,12 +309,14 @@ def _validate_patch(patch: str) -> None:
     for raw_path in raw_paths:
         _check_path(raw_path)
 
-    # Strict structural gate: the marker checks above accept truncated hunks
+    # Strict structural gate on the raw stored/applied text: the marker checks
+    # above accept truncated hunks; validating stripped text would drop a
+    # trailing blank context line that the appliers still count.
     # (declared counts unmet) that persist as Attempts and crash Phase 8.
     # Re-raised as PatchFormatRejected so the normal format-retry regen path
     # handles it; path violations above stay hard PatchRejected.
     try:
-        validate_unified_diff(stripped)
+        validate_unified_diff(patch)
     except InvalidUnifiedDiffError as exc:
         raise PatchFormatRejected(
             f"Patch is not a strictly valid unified diff: {exc}"
@@ -806,7 +823,7 @@ async def _call_and_parse(
         max_tokens=_FIX_MAX_TOKENS,
     )
 
-    truncation = _detect_truncation(response, _FIX_MAX_TOKENS)
+    truncation = _detect_truncation(response, _effective_max_tokens(_FIX_MAX_TOKENS))
     if truncation is not None and _provider_reported_truncation(response):
         # Provider verdict: cut payload, fail before any parse or persist.
         _raise_truncated(truncation, attempt="first attempt")
@@ -851,7 +868,7 @@ async def _call_and_parse(
         max_tokens=_FIX_MAX_TOKENS,
     )
 
-    retry_truncation = _detect_truncation(retry_response, _FIX_MAX_TOKENS)
+    retry_truncation = _detect_truncation(retry_response, _effective_max_tokens(_FIX_MAX_TOKENS))
     if retry_truncation is not None and _provider_reported_truncation(
         retry_response
     ):

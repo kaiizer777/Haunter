@@ -1483,22 +1483,6 @@ async def _orchestrator_pipeline_body(
 
                             token = await get_installation_token(repo)
                             target_branch = run.pr_branch or run.head_branch
-
-                            # F4 pre-check: same fail-closed dry-run as the main
-                            # path (it also strict-validates, so a truncated
-                            # refined patch fails here, not at commit time).
-                            # No regen on mismatch, unlike Phase 8: the
-                            # refinement already spent its regen answering
-                            # reviewer feedback, so a mismatch means the base
-                            # moved under a just-verified patch and must
-                            # surface as an error, not another generation.
-                            await _ensure_refinement_applies(
-                                owner=repo.owner,
-                                repo_name=repo.name,
-                                target_branch=target_branch,
-                                patch_text=attempt.patch_text,
-                                token=token,
-                            )
                             pr_number = run.pr_number
 
                             # Conversational `test-fix` (conclusion == "test-fix"):
@@ -1506,7 +1490,9 @@ async def _orchestrator_pipeline_body(
                             # fix_generator validation and the GitHub Actions
                             # sandbox — report the verdict in the thread that
                             # asked WITHOUT committing to the PR branch, then
-                            # terminate as `completed`.
+                            # terminate as `completed`. Returns before the
+                            # commit-bound dry-run gate below, which must only
+                            # gate runs that actually commit.
                             if (run.conclusion or "") == TEST_FIX_CONCLUSION:
                                 test_fix_body = (
                                     "🤖 @haunter `test-fix` verdict: "
@@ -1553,6 +1539,24 @@ async def _orchestrator_pipeline_body(
                                     attempt.attempt_number,
                                 )
                                 return
+
+                            # F4 pre-check: same fail-closed dry-run as the main
+                            # path (it also strict-validates, so a truncated
+                            # refined patch fails here, not at commit time).
+                            # No regen on mismatch, unlike Phase 8: the
+                            # refinement already spent its regen answering
+                            # reviewer feedback, so a mismatch means the base
+                            # moved under a just-verified patch and must
+                            # surface as an error, not another generation.
+                            # Commit-bound only: the test-fix verify-only
+                            # return above runs before this gate.
+                            await _ensure_refinement_applies(
+                                owner=repo.owner,
+                                repo_name=repo.name,
+                                target_branch=target_branch,
+                                patch_text=attempt.patch_text,
+                                token=token,
+                            )
 
                             commit_sha = await commit_patch(
                                 owner=repo.owner,
