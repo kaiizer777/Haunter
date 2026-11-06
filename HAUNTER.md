@@ -10,7 +10,13 @@
 
 ## 1. System Purpose & Core Boundaries
 
-Haunter is an autonomous serverless GitHub agent/bot that reviews pull requests and fixes issues mentioned in (or explicitly requested on) those pull requests. It is triggered only by GitHub tags or webhooks (e.g. `pull_request`, `issue_comment`, and tag events). For now it operates as a PR agent: it reviews a PR across security, regressions, architecture, and performance, and, when an issue is mentioned in the PR or it is told to, generates a candidate fix, verifies it within a sterile GitHub Actions sandbox mirror, and opens a pull request under a strict human-merge gate. State and traces are logged to Neon Postgres and surfaced on a Cloudflare Workers dashboard.
+Haunter is your personal 24/7 GitHub bot. Fork this repo, deploy your own copy (backend on AWS Lambda, dashboard SPA on Cloudflare Workers, Postgres on Neon — no extra code), point it at your repositories, and it works for you around the clock. It has three powers:
+
+1. **Review PRs** — every `pull_request` event (`opened`, `synchronize`, `ready_for_review`, `reopened`; see `backend/app/github/pr.py`) gets reviewed across security, regressions, architecture, and performance, with confident findings reported in the review.
+2. **Fix tagged issues + raise PRs** — comment `@haunter` / `@haunter-bot` / `/fix`, or `@haunter-auditor fix this issue` (see `backend/app/services/followup_commands.py`, `backend/app/webhooks.py`), and Haunter generates a candidate fix, verifies it in a sterile GitHub Actions sandbox mirror, and opens a pull request under a strict human-merge gate. It never auto-merges and never pushes to your default branch.
+3. **Join the conversation on tag** — `@haunter-auditor` questions get answered in-thread (see `backend/app/webhooks.py`), so design discussions keep moving while you are away.
+
+It runs 24/7 as an AWS Lambda Function URL (FastAPI + Mangum, async self-invoke via `backend/app/adapters/hosting.py`) with state and traces in Neon Postgres, surfaced on your own Cloudflare Workers dashboard.
 
 ```
        [ Upstream User Repository ]
@@ -628,7 +634,7 @@ Asynchronous self-invocations (`boto3.client("lambda").invoke(InvocationType="Ev
 
 ### 8.1 Backend: AWS Lambda Function URL
 - **Hosting Adapter:** FastAPI wrapped with Mangum (`lifespan="off"`).
-- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:159`, `backend/rebuild_lambda_zip.py:53`, and `redeploy.md`).
+- **Architecture:** `x86_64` (Verified in `infra/aws/lambda.tf:160` (`architectures`, line 180), `backend/rebuild_lambda_zip.py:53`, and `infra/redeploy.md`).
 - **Memory:** 512 MB.
 - **Execution Timeout:** 900 seconds (15 minutes).
 - **Endpoint Protocol:** AWS Lambda Function URL (`auth_type = "NONE"`).
@@ -743,7 +749,7 @@ During early system design, Haunter planned multi-cloud sandbox runners across A
 Originally targeted for Cloudflare Pages (`*.pages.dev`), the frontend hosting was migrated to **Cloudflare Workers Static Assets** (`frontend/wrangler.jsonc`) using worker `haunter`. This consolidates edge infrastructure onto Cloudflare's modern Workers platform with explicit asset directory routing (`./out`) and single-command Wrangler deployments.
 
 ### 12.3 Compute Architecture Alignment: x86_64
-Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:159`, `redeploy.md`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
+Early architecture drafts proposed ARM64 Graviton2 for Lambda. Ground truth verification confirmed and locked the architecture to **`x86_64`** (`infra/aws/lambda.tf:160`, `infra/redeploy.md`). Cross-compiling Python packages with native extensions (such as `asyncpg` and `cryptography`) from Windows development hosts for Lambda requires standardizing on `--platform manylinux2014_x86_64`, which aligns with the x86_64 Lambda runtime.
 
 ### 12.4 Session Security Fix: SameSite=None
 Original drafts specified `SameSite=Lax` for session cookies. In cross-origin topologies where the frontend is hosted on Cloudflare Workers and the API is hosted on AWS Lambda Function URL, modern browsers classify API requests as third-party cross-site contexts and refuse to send `SameSite=Lax` cookies. The architecture strictly mandates `samesite="none"` paired with `secure=True` and `httponly=True`.
