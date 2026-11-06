@@ -82,7 +82,7 @@ TRIGGER_COMMENT_ID = 778899
 PATCH_TEXT = (
     "--- a/calc.py\n"
     "+++ b/calc.py\n"
-    "@@ -1,2 +1,3 @@\n"
+    "@@ -1,1 +1,1 @@\n"
     "-def add(): pass\n"
     "+def add(a, b): return a + b\n"
 )
@@ -311,6 +311,16 @@ def enter_pipeline(stack: ExitStack) -> None:
             "app.github.pr.get_installation_token",
             new_callable=AsyncMock,
             return_value="fake_token",
+        ),
+        patch(
+            "app.github_client.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value="abcdef0123456789abcdef0123456789abcdef01",
+        ),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            new_callable=AsyncMock,
+            return_value=None,
         ),
     ):
         stack.enter_context(ctx)

@@ -693,7 +693,7 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     refined_patch = (
         "--- a/calc.py\n"
         "+++ b/calc.py\n"
-        "@@ -1,2 +1,3 @@\n"
+        "@@ -1,1 +1,3 @@\n"
         "-def add(): pass\n"
         "+def add(a: int, b: int) -> int:\n"
         "+    '''Add two integers.'''\n"
@@ -741,6 +741,16 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             "app.github.pr.get_installation_token",
             new_callable=AsyncMock,
             return_value="fake_token",
+        ),
+        patch(
+            "app.github_client.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value="abcdef99887766554433221100aabbccddeeff11",
+        ),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            new_callable=AsyncMock,
+            return_value=None,
         ),
         patch(
             "app.github.pr.commit_patch",

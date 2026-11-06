@@ -30,7 +30,7 @@ import re
 import time
 import uuid
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import NoReturn, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.diff_validation import InvalidUnifiedDiffError, validate_unified_diff
 from app.llm import LLMClient
 from app.models import Attempt, Run
 from app.services.token_accounting import make_run_step, normalize_usage
@@ -116,6 +117,54 @@ class FixGenerationError(Exception):
     """Raised when LLM output fails Pydantic validation on both initial and retry calls."""
 
 
+class FixOutputTruncatedError(FixGenerationError):
+    """Raised when the provider reports the generation was cut by the token budget.
+
+    No retry: re-requesting the identical budget truncates identically, so the
+    retry would end as a generic parse failure hiding the cause. Mirrors
+    code_reviewer.ReviewOutputTruncatedError; subclasses FixGenerationError so
+    existing handlers keep working.
+    """
+
+
+#: Provider finish/stop reasons that are positive evidence the output budget
+#: ran out. Same vocabulary as code_reviewer.TRUNCATION_FINISH_REASONS:
+#: anything outside this set is unknown, never truncation.
+TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+
+def _reported_finish_reason(response: dict) -> Optional[str]:
+    """Provider's verbatim end-of-generation reason, normalised, or None.
+
+    Reads finish_reason (and Anthropic's raw stop_reason). None means unknown,
+    never "stopped cleanly".
+    """
+    for key in ("finish_reason", "stop_reason"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _provider_reported_truncation(response: dict) -> bool:
+    """True when the provider itself named a member of TRUNCATION_FINISH_REASONS."""
+    reason = _reported_finish_reason(response)
+    return reason is not None and reason in TRUNCATION_FINISH_REASONS
+
+
+def _raise_truncated(reason: str, *, attempt: str) -> NoReturn:
+    """Log and raise FixOutputTruncatedError. NoReturn so callers cannot fall through into parsing a cut payload."""
+    logger.error(
+        "fix_generator: %soutput truncated by provider (finish_reason=%s) — refusing to persist a cut patch",
+        attempt,
+        reason,
+    )
+    raise FixOutputTruncatedError(
+        f"Fix generation {attempt}output was truncated by the provider "
+        f"(finish_reason={reason}). The patch is incomplete and was not stored."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schema — strict mode: no coercion, no float→int, no str→int
 # ---------------------------------------------------------------------------
@@ -166,10 +215,12 @@ def _validate_patch(patch: str) -> None:
        - No blocked prefix (.git/, .github/workflows/)
        - Not empty
        - No '//' in the raw path string
+    4. Strict unified-diff validity via validate_unified_diff: exact hunk
+       counts, well-formed file/hunk headers, no envelope or sentinel leakage.
 
     Raises:
         PatchRejected: with a human-readable reason.
-        PatchFormatRejected: if patch lacks required diff markers (retriable).
+        PatchFormatRejected: if patch lacks required diff markers or fails strict unified-diff validation (retriable).
     """
     stripped = patch.strip()
     if not stripped:
@@ -201,6 +252,17 @@ def _validate_patch(patch: str) -> None:
     # give a basic validity check. But if we do find paths, validate each one.
     for raw_path in raw_paths:
         _check_path(raw_path)
+
+    # Strict structural gate: the marker checks above accept truncated hunks
+    # (declared counts unmet) that persist as Attempts and crash Phase 8.
+    # Re-raised as PatchFormatRejected so the normal format-retry regen path
+    # handles it; path violations above stay hard PatchRejected.
+    try:
+        validate_unified_diff(stripped)
+    except InvalidUnifiedDiffError as exc:
+        raise PatchFormatRejected(
+            f"Patch is not a strictly valid unified diff: {exc}"
+        ) from exc
 
 
 def _check_path(raw_path: str) -> None:
@@ -703,6 +765,10 @@ async def _call_and_parse(
         max_tokens=10_000_000,
     )
 
+    reason = _reported_finish_reason(response)
+    if reason is not None and reason in TRUNCATION_FINISH_REASONS:
+        _raise_truncated(reason, attempt="first attempt ")
+
     raw_content: str = response.get("content") or ""
     content: str = _strip_markdown_fences(raw_content)
     if len(raw_content) != len(content):
@@ -738,6 +804,10 @@ async def _call_and_parse(
         db=db,
         max_tokens=10_000_000,
     )
+
+    retry_reason = _reported_finish_reason(retry_response)
+    if retry_reason is not None and retry_reason in TRUNCATION_FINISH_REASONS:
+        _raise_truncated(retry_reason, attempt="retry ")
 
     retry_raw_content: str = retry_response.get("content") or ""
     retry_content: str = _strip_markdown_fences(retry_raw_content)

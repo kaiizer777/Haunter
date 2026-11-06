@@ -237,6 +237,7 @@ async def test_pipeline_happy_path_full_flow(db: AsyncSession) -> None:
         ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock, return_value=None),
         patch("app.github.pr.dry_run_patch_at_sha", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock, return_value=None),
         patch(
             "app.github.pr.open_pr",
@@ -351,6 +352,7 @@ async def test_pipeline_retry_sandbox_fail_then_pass(db: AsyncSession) -> None:
         ),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.dry_run_patch_at_sha", AsyncMock(return_value=None)),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
         patch(
             "app.github.pr.open_pr",
@@ -798,6 +800,7 @@ async def test_pipeline_pr_writer_crash_sets_error(db: AsyncSession) -> None:
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.dry_run_patch_at_sha", AsyncMock(return_value=None)),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
         patch(
             "app.github.pr.open_pr",
@@ -975,6 +978,7 @@ async def test_pipeline_idempotent_reentry_from_fix_generation(
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.dry_run_patch_at_sha", AsyncMock(return_value=None)),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
         patch(
             "app.github.pr.open_pr",
@@ -1263,6 +1267,7 @@ async def test_pipeline_issue_golden_phrase_to_pr(db: AsyncSession) -> None:
         patch(
             "app.github.pr.dry_run_patch_at_sha", new_callable=AsyncMock, return_value=None
         ),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch(
             "app.github.pr.commit_patch", new_callable=AsyncMock, return_value=None
         ),
@@ -1365,6 +1370,7 @@ async def test_pipeline_issue_retry_sandbox_fail_then_pass(
         ),
         patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
         patch("app.github.pr.dry_run_patch_at_sha", AsyncMock(return_value=None)),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
         patch(
             "app.github.pr.open_pr",

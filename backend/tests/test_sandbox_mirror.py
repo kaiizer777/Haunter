@@ -208,7 +208,7 @@ async def test_push_patch_to_mirror_orphan_tree_and_commit() -> None:
             },
         )
 
-        seed_files = {"src/app.py": b"print('hello')"}
+        seed_files = {"src/app.py": b"print('hello')", "lib.py": b"old_code\n"}
 
         async with httpx.AsyncClient() as client:
             sha = await push_patch_to_mirror(
@@ -332,7 +332,7 @@ async def test_verify_orphan_branch_and_finally_cleanup(
         inp = SandboxInput(
             run_id=run_id,
             repo_ref="owner/repo",
-            patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-a\n+b\n",
+            patch="--- /dev/null\n+++ b/file.py\n@@ -0,0 +1 @@\n+a\n",
             attempt_number=1,
             user_github_id=123,
         )
@@ -422,7 +422,7 @@ async def test_verify_branch_cleanup_on_failure_in_finally(
         inp = SandboxInput(
             run_id=run_id,
             repo_ref="owner/repo",
-            patch="--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-a\n+b\n",
+            patch="--- /dev/null\n+++ b/file.py\n@@ -0,0 +1 @@\n+a\n",
             attempt_number=2,
             user_github_id=123,
         )
@@ -450,6 +450,7 @@ async def test_push_patch_to_mirror_prunes_deletions() -> None:
     )
     seed_files = {
         "deleted.py": b"remove this\n",
+        "kept.py": b"old\n",
         "untouched.py": b"untouched content\n",
     }
 
@@ -579,7 +580,7 @@ async def test_verify_multi_run_evaluation_fails_if_any_run_fails(
         inp = SandboxInput(
             run_id=run_id,
             repo_ref="owner/repo",
-            patch="--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n",
+            patch="--- /dev/null\n+++ b/f.py\n@@ -0,0 +1 @@\n+a\n",
             attempt_number=1,
             user_github_id=123,
         )
@@ -642,7 +643,7 @@ async def test_verify_optional_user_github_id(
         inp = SandboxInput(
             run_id=run_id,
             repo_ref="owner/repo",
-            patch="--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-a\n+b\n",
+            patch="--- /dev/null\n+++ b/f.py\n@@ -0,0 +1 @@\n+a\n",
             attempt_number=1,
             user_github_id=None,
         )
