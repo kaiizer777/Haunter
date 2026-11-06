@@ -1514,6 +1514,7 @@ async def _orchestrator_pipeline_body(
                             GitHubPRValidationError,
                             commit_patch,
                             create_branch,
+                            dry_run_patch_at_sha,
                             get_installation_token,
                             open_pr,
                         )
@@ -1543,6 +1544,104 @@ async def _orchestrator_pipeline_body(
                                 f"{invalid_patch}"
                             ) from invalid_patch
 
+                        # Issue #276: PR-apply dry-run BEFORE create_branch.
+                        # The sandbox verifier fuzzy-matches paraphrased -/context
+                        # lines that the fail-closed PR applier rejects, so a
+                        # verified patch can still fail commit_patch. Dry-run
+                        # the exact applier against run.head_sha; on mismatch
+                        # regenerate ONCE with the mismatch as feedback, then
+                        # re-validate + re-verify. A second mismatch (or any
+                        # regen failure) falls into the error path below.
+                        mismatch = await dry_run_patch_at_sha(
+                            owner=repo.owner,
+                            repo=repo.name,
+                            patch_text=attempt.patch_text,
+                            base_sha=run.head_sha,
+                            token=token,
+                        )
+                        if mismatch is not None:
+                            logger.warning(
+                                "orchestrator: run=%s PR dry-run mismatch on "
+                                "attempt #%d (%s) -- regenerating once",
+                                run_id,
+                                attempt.attempt_number,
+                                mismatch,
+                            )
+                            state["decisions"].append("pr_dry_run_mismatch_regen")
+                            dry_run_feedback = (
+                                "The verified patch does NOT apply to the "
+                                f"target branch: {mismatch} "
+                                "Every '-' and ' ' (context) line must be a "
+                                "byte-exact quote of the target file -- copy, "
+                                "never paraphrase. Regenerate the full patch "
+                                "with the quoted lines corrected."
+                            )
+                            attempt = await generate_fix(
+                                run=run,
+                                diagnosis_summary=run.diagnosis_summary or "",
+                                prior_attempt=attempt,
+                                db=attempt_db,
+                                review_feedback=dry_run_feedback,
+                            )
+                            # Issue #113: accumulate the just-persisted step
+                            # cost into the running total (same as above).
+                            try:
+                                _step_cost = getattr(
+                                    attempt, "_haunter_step_cost", 0.0
+                                )
+                                if isinstance(_step_cost, bool):
+                                    pass
+                                elif isinstance(_step_cost, (int, float)):
+                                    running_cost_dollars += float(_step_cost)
+                            except Exception:
+                                pass
+                            state["decisions"].append(
+                                f"fix_regenerated_attempt_{attempt.attempt_number}"
+                            )
+                            state["confidence"] = attempt.confidence_score
+                            try:
+                                validate_unified_diff(attempt.patch_text)
+                            except InvalidUnifiedDiffError as invalid_regen:
+                                raise GitHubPRValidationError(
+                                    "Regenerated fix patch is not a valid unified diff: "
+                                    f"{invalid_regen}"
+                                ) from invalid_regen
+                            verify_result = await sandbox_verify(
+                                attempt=attempt,
+                                run=run,
+                                repo=repo,
+                            )
+                            attempt.verification_status = verify_result["status"]
+                            attempt.failure_reason = verify_result[
+                                "failure_reason"
+                            ]
+                            attempt.build_duration_ms = verify_result[
+                                "build_duration_ms"
+                            ]
+                            attempt_db.add(attempt)
+                            await attempt_db.commit()
+                            if verify_result["status"] != "pass":
+                                raise GitHubPRValidationError(
+                                    "Regenerated patch failed sandbox verification "
+                                    f"({verify_result['status']}: "
+                                    f"{verify_result['failure_reason']}) after "
+                                    "PR dry-run mismatch."
+                                )
+                            mismatch = await dry_run_patch_at_sha(
+                                owner=repo.owner,
+                                repo=repo.name,
+                                patch_text=attempt.patch_text,
+                                base_sha=run.head_sha,
+                                token=token,
+                            )
+                            if mismatch is not None:
+                                raise GitHubPRValidationError(
+                                    "Regenerated patch still does not apply: "
+                                    f"{mismatch}"
+                                )
+                            state["decisions"].append("pr_dry_run_regen_clean")
+                        else:
+                            state["decisions"].append("pr_dry_run_clean")
                         await create_branch(
                             owner=repo.owner,
                             repo=repo.name,

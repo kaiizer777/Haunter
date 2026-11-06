@@ -1254,6 +1254,236 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     return result
 
 
+_MISMATCH_LINE_LIMIT = 200
+
+
+def _clip_mismatch_line(line: str) -> str:
+    """Clip a line quoted in a mismatch report so LLM feedback stays bounded."""
+    if len(line) <= _MISMATCH_LINE_LIMIT:
+        return line
+    return line[:_MISMATCH_LINE_LIMIT] + "..."
+
+
+def _describe_apply_mismatch(
+    original_text: str, file_patch: str, file_path: str
+) -> str:
+    """
+    Best-effort locator for a patch the fail-closed applier rejected.
+
+    Reporting-only: the apply DECISION always comes from
+    _apply_unified_diff_to_content. This replays each hunk in isolation
+    against the original text to find the first hunk that does not apply,
+    then reports its first diverging context/deletion line as
+    file + hunk header + expected-vs-actual so a regenerating LLM can quote
+    the target exactly. Falls back to a hunk-level message when hunks apply
+    in isolation but not in combination (e.g. overlapping hunks).
+    """
+    hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
+    hunks: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    for raw_line in file_patch.splitlines():
+        if raw_line.startswith("@@"):
+            if current is not None:
+                hunks.append(current)
+            current = (raw_line, [])
+        elif current is not None:
+            current[1].append(raw_line)
+    if current is not None:
+        hunks.append(current)
+
+    orig_lines = original_text.splitlines()
+    for header, body in hunks:
+        single_hunk_patch = header + "\n" + "\n".join(body) + "\n"
+        if (
+            _apply_unified_diff_to_content(original_text, single_hunk_patch)
+            is not None
+        ):
+            continue
+        # First failing hunk -- report its first diverging -/context line.
+        match = hunk_header_re.match(header)
+        idx = max(0, int(match.group(1)) - 1) if match else 0
+        for hunk_line in body:
+            if hunk_line.startswith("+") or hunk_line.startswith("\\"):
+                continue
+            if hunk_line == "":
+                # Mirrors the applier: a blank line is context that always
+                # "applies" (it never fail-closes); consume an original line
+                # only when that line is itself empty.
+                if idx < len(orig_lines) and orig_lines[idx].strip() == "":
+                    idx += 1
+                continue
+            if hunk_line[:1] in (" ", "-"):
+                kind = "context" if hunk_line.startswith(" ") else "deletion"
+                expected = hunk_line[1:]
+                if idx >= len(orig_lines):
+                    return (
+                        f"patch does not apply to {file_path}: hunk {header}: "
+                        f"expected {kind} line "
+                        f"{_clip_mismatch_line(expected)!r} but the target "
+                        f"file ends at line {idx}."
+                    )
+                actual = orig_lines[idx]
+                if _norm_hunk_line(actual) != _norm_hunk_line(expected):
+                    return (
+                        f"patch does not apply to {file_path}: hunk {header}: "
+                        f"expected {kind} line "
+                        f"{_clip_mismatch_line(expected)!r} but target line "
+                        f"{idx + 1} is {_clip_mismatch_line(actual)!r}."
+                    )
+                idx += 1
+                continue
+            # Unknown prefix -- the applier fail-closes on these.
+            return (
+                f"patch does not apply to {file_path}: hunk {header}: "
+                f"unexpected line prefix in {_clip_mismatch_line(hunk_line)!r}."
+            )
+        return (
+            f"patch does not apply to {file_path}: hunk {header} "
+            f"does not match the target file."
+        )
+    # Every hunk applies in isolation but the combination does not (e.g.
+    # overlapping hunks): no single first divergence to quote.
+    return (
+        f"patch does not apply to {file_path}: hunk context does not match "
+        f"the target file."
+    )
+
+
+async def dry_run_patch_at_sha(
+    owner: str,
+    repo: str,
+    patch_text: str,
+    base_sha: str,
+    token: str,
+) -> str | None:
+    """
+    Read-only dry-run of commit_patch apply semantics against base_sha.
+
+    Fetches each target file at base_sha via the Contents API (same headers
+    and base64 decode as commit_patch), splits via _parse_patch_files, and
+    runs the fail-closed _apply_unified_diff_to_content per file.
+
+    Returns None when the patch applies cleanly, otherwise a
+    file+hunk+expected-vs-actual mismatch description for LLM-regen feedback.
+    Makes no blob/tree/commit/ref calls and creates no branch.
+
+    Raises:
+        GitHubPRValidationError: patch is structurally unusable (the same
+            cases commit_patch fail-closes on before any per-file apply).
+        GitHubPRError: a GitHub API call failed.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    if not base_sha or not isinstance(base_sha, str):
+        raise GitHubPRValidationError(
+            "Cannot dry-run remediation diff: missing base SHA."
+        )
+
+    try:
+        validate_unified_diff(patch_text)
+    except InvalidUnifiedDiffError as exc:
+        raise GitHubPRValidationError(
+            f"Refusing to apply malformed remediation diff: {exc}"
+        ) from exc
+
+    headers = _build_auth_headers(token)
+    api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+    per_file_patches = _parse_patch_files(patch_text)
+    if not per_file_patches:
+        raise GitHubPRValidationError(
+            "Refusing to apply remediation diff: no applicable file sections."
+        )
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        for file_path, file_patch in per_file_patches.items():
+            # Same last line of defence as commit_patch before any apply.
+            if len(file_path) > 255 or not _BRANCH_RE.match(
+                file_path.replace("/", "_")
+            ):
+                if (
+                    ".." in file_path
+                    or file_path.startswith("/")
+                    or "//" in file_path
+                ):
+                    raise GitHubPRValidationError(
+                        "Refusing to apply remediation diff: invalid file path."
+                    )
+
+            # Check for explicit file deletion (same detection as commit_patch)
+            is_deletion = False
+            patch_lines = file_patch.splitlines()
+            if len(patch_lines) >= 2:
+                second_line = patch_lines[1].strip()
+                if (
+                    second_line
+                    in (
+                        "+++ /dev/null",
+                        "+++ b/dev/null",
+                        "+++ b//dev/null",
+                        "+++ dev/null",
+                    )
+                    or "/dev/null" in second_line
+                ):
+                    is_deletion = True
+
+            # Fetch current file content at the base SHA (may be 404 for a
+            # new file). Same decode as commit_patch.
+            try:
+                content_resp = await client.get(
+                    f"{api}/contents/{file_path}",
+                    headers=headers,
+                    params={"ref": base_sha},
+                )
+            except httpx.RequestError as exc:
+                raise GitHubPRError(
+                    "Network error fetching contents for "
+                    f"{file_path!r}: {exc.__class__.__name__}"
+                ) from exc
+            if content_resp.status_code == 404:
+                if is_deletion:
+                    continue
+                original_text = ""
+            elif content_resp.is_error:
+                raise GitHubPRError(
+                    "Cannot fetch file contents for the patch target: "
+                    f"HTTP {content_resp.status_code}"
+                )
+            else:
+                try:
+                    data = content_resp.json()
+                    # Contents API returns base64-encoded content (may be list for dir)
+                    if isinstance(data, list):
+                        raise GitHubPRError(
+                            "Patch target resolves to a directory, not a file."
+                        )
+                    b64 = data.get("content", "")
+                    # Content may contain newlines; GitHub wraps at 60 chars
+                    b64_clean = "".join(b64.split())
+                    original_text = (
+                        base64.b64decode(b64_clean).decode(
+                            "utf-8", errors="replace"
+                        )
+                        if b64_clean
+                        else ""
+                    )
+                except GitHubPRError:
+                    raise
+                except Exception as exc:
+                    raise GitHubPRError(
+                        "Cannot decode the current file contents for the patch target."
+                    ) from exc
+
+            if (
+                _apply_unified_diff_to_content(original_text, file_patch)
+                is None
+            ):
+                return _describe_apply_mismatch(
+                    original_text, file_patch, file_path
+                )
+    return None
+
+
 async def commit_patch(
     owner: str,
     repo: str,
