@@ -1056,6 +1056,18 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     return files
 
 
+def _norm_hunk_line(line: str) -> str:
+    """Normalize a line for hunk context/deletion comparison.
+
+    Strips a trailing carriage return and trailing whitespace so patches
+    authored against LF text apply to CRLF files (and vice versa), and so
+    insignificant trailing whitespace emitted by the model does not fail
+    closed. Comparison-only: callers still emit the original file's lines,
+    so committed content never comes from the patch text.
+    """
+    return line.removesuffix("\r").rstrip()
+
+
 def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str | None:
     """
     Apply a per-file unified diff segment to original_text.
@@ -1112,10 +1124,11 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     break
                 hunk_line = lines[i]
                 if hunk_line.startswith(" "):
-                    # Context — must match original
+                    # Context — must match original (whitespace-tolerant)
                     if (
                         orig_idx >= len(orig_lines)
-                        or orig_lines[orig_idx] != hunk_line[1:]
+                        or _norm_hunk_line(orig_lines[orig_idx])
+                        != _norm_hunk_line(hunk_line[1:])
                     ):
                         return None
                     new_lines.append(orig_lines[orig_idx])
@@ -1126,7 +1139,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     # Deletion — must match original then skip
                     if (
                         orig_idx >= len(orig_lines)
-                        or orig_lines[orig_idx] != hunk_line[1:]
+                        or _norm_hunk_line(orig_lines[orig_idx])
+                        != _norm_hunk_line(hunk_line[1:])
                     ):
                         return None
                     orig_idx += 1
