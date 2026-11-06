@@ -742,7 +742,11 @@ async def fetch_repo_tree_paths(
     Returns prioritized source files up to max_paths.
     """
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
-    headers = _build_headers(token=token, accept="application/vnd.github+json")
+    headers = _build_headers(
+        token=token,
+        accept="application/vnd.github+json",
+        allow_global_token=allow_global_token,
+    )
 
     async with httpx.AsyncClient(
         timeout=DEFAULT_TIMEOUT_SECONDS, follow_redirects=True
