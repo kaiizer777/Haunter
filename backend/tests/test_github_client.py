@@ -47,6 +47,7 @@ from app.github_client import (
     fetch_diff,
     fetch_issue,
     fetch_issue_comments,
+    fetch_repo_tree_paths,
     fetch_issue_timeline,
     fetch_workflow_run_logs,
     post_commit_comment,
@@ -129,6 +130,34 @@ def test_build_headers_custom_accept():
     assert headers["Authorization"] == "Bearer tok"
     assert headers["User-Agent"] == "Haunter-Autonomous-Agent/1.0"
     assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+def test_build_headers_fail_closed_no_token():
+    """allow_global_token=False with no token raises GitHubAuthError."""
+    import pytest as _pytest
+
+    with _pytest.raises(GitHubAuthError):
+        _build_headers(token=None, allow_global_token=False)
+
+
+# ---------------------------------------------------------------------------
+# fetch_repo_tree_paths tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_tree_paths_accepts_allow_global_token():
+    """fetch_repo_tree_paths forwards allow_global_token to _build_headers."""
+    import respx as _respx
+
+    with _respx.mock(assert_all_called=True) as router:
+        router.get(f"{GITHUB_API_BASE}/repos/o/r/git/trees/abc?recursive=1").mock(
+            return_value=httpx.Response(200, json={"tree": [{"path": "a.py", "type": "blob"}]})
+        )
+        paths = await fetch_repo_tree_paths(
+            owner="o", repo="r", sha="abc", token="tok", allow_global_token=False
+        )
+    assert paths == ["a.py"]
 
 
 # ---------------------------------------------------------------------------

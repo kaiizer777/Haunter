@@ -1010,6 +1010,75 @@ async def test_gather_issue_context_passes_repo_name_to_comment_fetch():
     assert "still broken on main" in captured["issue_block"]
     assert "@reporter" in captured["issue_block"]
 
+
+@pytest.mark.asyncio
+async def test_gather_issue_context_mints_installation_token():
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    run = make_run()
+    issue_payload = {"title": "Crash on empty config", "body": "Start with no config."}
+    page = IssueCommentPage(comments=())
+    captured: dict[str, Any] = {}
+
+    async def fake_llm(**kwargs: Any) -> tuple[str, dict[str, Any], int, int, int]:
+        captured["issue_block"] = kwargs["issue_block"]
+        return ("diagnosis summary", {"model": "test"}, 5, 10, 20)
+
+    with (
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_mint,
+        patch("app.github_client.fetch_issue", new_callable=AsyncMock) as mock_issue,
+        patch("app.github_client.fetch_issue_comments", new_callable=AsyncMock) as mock_comments,
+        patch("app.github_client.fetch_repo_tree_paths", new_callable=AsyncMock) as mock_tree,
+        patch(
+            "app.subagents.context_gatherer._call_with_empty_retry",
+            new_callable=AsyncMock,
+            side_effect=fake_llm,
+        ),
+        patch("app.subagents.context_gatherer._persist_run_step", new_callable=AsyncMock),
+    ):
+        mock_mint.return_value = "install-tok"
+        mock_issue.return_value = issue_payload
+        mock_comments.return_value = page
+        mock_tree.return_value = []
+        await gather_issue_context(run=run, repo=repo, db=MagicMock())
+
+    assert mock_mint.await_args.args[0] is repo
+    assert mock_issue.await_args.kwargs["token"] == "install-tok"
+    assert mock_issue.await_args.kwargs["allow_global_token"] is False
+    assert mock_tree.await_args.kwargs["token"] == "install-tok"
+    assert mock_tree.await_args.kwargs["allow_global_token"] is False
+
+
+@pytest.mark.asyncio
+async def test_gather_issue_context_token_mint_failure_continues():
+    repo = Repo(user_id=uuid.uuid4(), owner=OWNER, name=REPO)
+    run = make_run()
+    issue_payload = {"title": "Crash on empty config", "body": "Start with no config."}
+
+    async def fake_llm(**kwargs: Any) -> tuple[str, dict[str, Any], int, int, int]:
+        return ("diagnosis summary", {"model": "test"}, 5, 10, 20)
+
+    with (
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_mint,
+        patch("app.github_client.fetch_issue", new_callable=AsyncMock) as mock_issue,
+        patch("app.github_client.fetch_issue_comments", new_callable=AsyncMock) as mock_comments,
+        patch("app.github_client.fetch_repo_tree_paths", new_callable=AsyncMock) as mock_tree,
+        patch(
+            "app.subagents.context_gatherer._call_with_empty_retry",
+            new_callable=AsyncMock,
+            side_effect=fake_llm,
+        ),
+        patch("app.subagents.context_gatherer._persist_run_step", new_callable=AsyncMock),
+    ):
+        mock_mint.side_effect = RuntimeError("no app creds")
+        mock_issue.return_value = issue_payload
+        mock_comments.return_value = IssueCommentPage(comments=())
+        mock_tree.return_value = []
+        summary = await gather_issue_context(run=run, repo=repo, db=MagicMock())
+
+    assert summary == "diagnosis summary"
+    assert mock_issue.await_args.kwargs["token"] is None
+    assert mock_issue.await_args.kwargs["allow_global_token"] is False
+
 # ---------------------------------------------------------------------------
 # Auditor fix-trigger routing (feat-251, issue #254)
 # ---------------------------------------------------------------------------
