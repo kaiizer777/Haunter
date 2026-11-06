@@ -1066,8 +1066,10 @@ def _norm_hunk_line(line: str) -> str:
     Strips a trailing carriage return and trailing whitespace so patches
     authored against LF text apply to CRLF files (and vice versa), and so
     insignificant trailing whitespace emitted by the model does not fail
-    closed. Comparison-only: callers still emit the original file's lines,
-    so committed content never comes from the patch text.
+    closed. Comparison-only for context/deletion matching: matched lines are
+    still emitted from the target file's own lines (additions, which define
+    new content, are inserted verbatim from the patch — pre-existing
+    behavior this helper does not change).
     """
     return line.removesuffix("\r").rstrip()
 
