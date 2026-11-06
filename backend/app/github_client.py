@@ -735,6 +735,7 @@ async def fetch_repo_tree_paths(
     sha: str,
     token: Optional[str] = None,
     max_paths: int = 60,
+    allow_global_token: bool = True,
 ) -> list[str]:
     """
     Fetch repository file tree paths via Git Trees API (recursive).
