@@ -1394,3 +1394,37 @@ async def test_generate_fix_includes_prior_strategy_notes_in_prompt(
     assert "### Prior Strategy Notes" in prior_turn
     assert "repaired import but test assertion failed on return value" in prior_turn
     assert "AssertionError: Expected 42 got 0" in prior_turn
+
+
+def test_validate_patch_rejects_redacted_marker_in_hunk_lines() -> None:
+    """A [REDACTED...] marker in a '-' or context line is a format reject."""
+    deletion_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " line1\n"
+        "-api_key = [REDACTED]\n"
+        '+api_key = "new"\n'
+    )
+    context_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " api_key = [REDACTED_CONN_STRING]\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(PatchFormatRejected):
+        _validate_patch(deletion_patch)
+    with pytest.raises(PatchFormatRejected):
+        _validate_patch(context_patch)
+
+
+def test_build_messages_warns_against_redacted_markers() -> None:
+    """The system prompt must forbid [REDACTED...] in -/context lines."""
+    messages = _build_messages(
+        diagnosis_summary="ImportError: cannot import foo in app/models.py:10",
+        prior_attempt=None,
+    )
+    assert messages[0]["role"] == "system"
+    assert "[REDACTED" in messages[0]["content"]
