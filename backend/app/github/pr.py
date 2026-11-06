@@ -28,6 +28,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -1309,7 +1310,7 @@ def _describe_apply_mismatch(
                 # Mirrors the applier: a blank line is context that always
                 # "applies" (it never fail-closes); consume an original line
                 # only when that line is itself empty.
-                if idx < len(orig_lines) and orig_lines[idx].strip() == "":
+                if idx < len(orig_lines) and orig_lines[idx].removesuffix("\r\n").removesuffix("\n") == "":
                     idx += 1
                 continue
             if hunk_line[:1] in (" ", "-"):
@@ -1395,6 +1396,10 @@ async def dry_run_patch_at_sha(
             "Refusing to apply remediation diff: no applicable file sections."
         )
 
+    # Files the patch actually applies to. A 404 + deletion skip does
+    # not count: a patch that applies to nothing must not read as clean.
+    applied_or_deleted_count = 0
+
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         for file_path, file_patch in per_file_patches.items():
             # Same last line of defence as commit_patch before any apply.
@@ -1431,7 +1436,7 @@ async def dry_run_patch_at_sha(
             # new file). Same decode as commit_patch.
             try:
                 content_resp = await client.get(
-                    f"{api}/contents/{file_path}",
+                    f"{api}/contents/{quote(file_path, safe='/')}",
                     headers=headers,
                     params={"ref": base_sha},
                 )
@@ -1481,6 +1486,12 @@ async def dry_run_patch_at_sha(
                 return _describe_apply_mismatch(
                     original_text, file_patch, file_path
                 )
+            applied_or_deleted_count += 1
+    if applied_or_deleted_count == 0:
+        return (
+            "patch produces no file changes: every file section skipped "
+            "(deletion of an already-absent target)."
+        )
     return None
 
 
@@ -1610,7 +1621,7 @@ async def commit_patch(
 
             # Fetch current file content (may be new file → 404)
             content_resp = await client.get(
-                f"{api}/contents/{file_path}",
+                f"{api}/contents/{quote(file_path, safe='/')}",
                 headers=headers,
                 params={"ref": head_sha},
             )

@@ -227,7 +227,8 @@ async def test_dry_run_clean_patch_returns_none() -> None:
 
 @pytest.mark.anyio
 async def test_dry_run_new_file_and_missing_deletion_target() -> None:
-    """New-file patch with 404 contents applies; deletion of missing skips."""
+    """New-file patch with 404 contents applies; deletion-only of a missing
+    target reports no file changes instead of reading as clean."""
     head_sha = "c" * 40
     new_file_patch = "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+hello\n"
     delete_missing_patch = (
@@ -261,7 +262,8 @@ async def test_dry_run_new_file_and_missing_deletion_target() -> None:
         http_calls_inside = list(rx.calls)
 
     assert new_result is None
-    assert delete_result is None
+    assert delete_result is not None
+    assert "no file changes" in delete_result
     assert {c.request.method for c in http_calls_inside} == {"GET"}
 
 
@@ -661,3 +663,86 @@ async def test_pipeline_regen_cost_over_ceiling_skips_github_writes(
     assert db_run.status == "fallback_commented"
     assert db_run.failure_reason is not None
     assert "exceeds" in db_run.failure_reason
+
+
+@pytest.mark.anyio
+async def test_pipeline_deletion_only_absent_target_never_creates_branch(
+    db: AsyncSession,
+) -> None:
+    """Deletion-only patch with 404 target: real dry-run reports no file
+    changes, the mismatch regens once, and no branch is ever created."""
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_run(db, repo, status="pending")
+    run_id = run.id
+    head_sha = run.head_sha
+
+    gone_patch = "--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-gone line\n"
+    still_gone_patch = (
+        "--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-other gone line\n"
+    )
+    call_log: list[dict[str, Any]] = []
+    generate_mock = _mock_generate_fix_with(
+        [{"number": 1, "patch": gone_patch}, {"number": 2, "patch": still_gone_patch}],
+        call_log,
+    )
+
+    with (
+        patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=generate_mock
+        ),
+        patch(
+            "app.sandbox.verify",
+            AsyncMock(
+                return_value={
+                    "status": "pass",
+                    "failure_reason": None,
+                    "build_duration_ms": 100,
+                }
+            ),
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(return_value={"title": "fix: gone", "body": "body"}),
+        ),
+        patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        respx.mock(
+            base_url="https://api.github.com", assert_all_called=False
+        ) as rx,
+        patch(
+            "app.github.pr.create_branch", AsyncMock(return_value=None)
+        ) as mock_create_branch,
+        patch(
+            "app.github.pr.commit_patch", AsyncMock(return_value=None)
+        ) as mock_commit_patch,
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/dryrun-org/dryrun-repo/pull/7",
+                    "number": 7,
+                }
+            ),
+        ) as mock_open_pr,
+    ):
+        rx.get(
+            f"/repos/dryrun-org/dryrun-repo/contents/gone.py?ref={head_sha}"
+        ).mock(return_value=httpx.Response(404))
+        await handle_failed_run(run_id)
+
+    # The real dry-run fed the no-file-changes mismatch back as regen feedback.
+    assert len(call_log) == 2
+    assert "no file changes" in (call_log[1]["review_feedback"] or "")
+
+    mock_create_branch.assert_not_called()
+    mock_commit_patch.assert_not_called()
+    mock_open_pr.assert_not_called()
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+    assert db_run.status == "error"
+    assert db_run.failure_reason is not None
+    assert "no file changes" in db_run.failure_reason

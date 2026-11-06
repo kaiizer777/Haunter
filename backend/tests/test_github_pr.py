@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import json
+import re
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -34,12 +35,14 @@ from app.github.pr import (
     _clear_pem_cache_for_tests,
     _escape_pr_text,
     _apply_unified_diff_to_content,
+    _describe_apply_mismatch,
     _parse_patch_files,
     _resolve_app_credentials,
     _resolve_write_credentials,
     commit_patch,
     create_branch,
     delete_branch_ref,
+    dry_run_patch_at_sha,
     get_branch_ref,
     get_installation_token,
     open_pr,
@@ -1531,3 +1534,74 @@ def test_apply_unified_diff_many_no_newline_markers_linear() -> None:
     )
     expected = "".join(f"L{k}\n" for k in range(count - 1)) + f"L{count - 1}"
     assert _apply_unified_diff_to_content("a", file_patch) == expected
+
+
+def test_describe_blank_context_ignores_whitespace_only_line() -> None:
+    """A blank hunk line must not consume a whitespace-only original line.
+
+    Parity with the applier: only a truly empty original line is consumed
+    by a blank ("") hunk line, so the reported divergence matches the line
+    the applier actually failed on.
+    """
+    original = "a\n   \nb\n"
+    file_patch = (
+        "--- a/f\n"
+        "+++ b/f\n"
+        "@@ -1,3 +1,3 @@\n"
+        " a\n"
+        "\n"
+        " b\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) is None
+    report = _describe_apply_mismatch(original, file_patch, "f")
+    assert "target line 2" in report
+
+
+@pytest.mark.anyio
+async def test_dry_run_deletion_only_absent_target_reports_no_changes() -> None:
+    """A deletion-only patch whose target is 404 must not read as clean."""
+    head_sha = "d" * 40
+    delete_missing_patch = (
+        "--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-whatever\n"
+    )
+    with respx.mock(
+        base_url="https://api.github.com", assert_all_called=False
+    ) as rx:
+        rx.get(
+            f"/repos/dryrun-org/dryrun-repo/contents/gone.py?ref={head_sha}"
+        ).mock(return_value=httpx.Response(404))
+        mismatch = await dry_run_patch_at_sha(
+            owner="dryrun-org",
+            repo="dryrun-repo",
+            patch_text=delete_missing_patch,
+            base_sha=head_sha,
+            token="fake-token",
+        )
+    assert mismatch is not None
+    assert "no file changes" in mismatch
+
+
+@pytest.mark.anyio
+async def test_contents_url_encodes_special_chars_in_path() -> None:
+    """File paths with URL-significant chars must be percent-encoded."""
+    head_sha = "e" * 40
+    new_file_patch = "--- /dev/null\n+++ b/a#b?.py\n@@ -0,0 +1 @@\n+hello\n"
+    with respx.mock(
+        base_url="https://api.github.com", assert_all_called=False
+    ) as rx:
+        rx.get(re.compile(r"contents")).mock(
+            return_value=httpx.Response(404)
+        )
+        mismatch = await dry_run_patch_at_sha(
+            owner="enc-org",
+            repo="enc-repo",
+            patch_text=new_file_patch,
+            base_sha=head_sha,
+            token="fake-token",
+        )
+        calls = list(rx.calls)
+    assert mismatch is None
+    assert calls, "expected the Contents GET"
+    urls = [str(call.request.url) for call in calls]
+    assert any("a%23b%3F.py" in url for url in urls)
+    assert not any("a#b" in url for url in urls)
