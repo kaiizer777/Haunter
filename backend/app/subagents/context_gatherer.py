@@ -1208,9 +1208,12 @@ async def gather_issue_context(
 
     token: Optional[str] = None
     try:
+        from app.config import settings
         from app.github.pr import get_installation_token
 
-        token = await get_installation_token(repo)
+        minted = await get_installation_token(repo)
+        if minted and minted != settings.github_token:
+            token = minted
     except Exception:
         token = None
 
