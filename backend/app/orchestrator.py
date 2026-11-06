@@ -747,6 +747,108 @@ def check_fast_fail(
 
 
 # ---------------------------------------------------------------------------
+# Phase-8 / refinement PR-apply guards (fail-closed; extracted as helpers so
+# the hermetic batch suite can pin them without a DB-backed pipeline run)
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_refinement_applies(
+    *,
+    owner: str,
+    repo_name: str,
+    target_branch: str,
+    patch_text: str,
+    token: str,
+) -> str:
+    """F4 pre-check: dry-run the refined patch at the live branch HEAD.
+
+    Returns the base SHA the patch was checked against. Raises
+    GitHubPRValidationError on mismatch — before any commit_patch call, so a
+    stale refined patch can never partially commit.
+    """
+    from app.github.pr import GitHubPRValidationError, dry_run_patch_at_sha
+    from app.github_client import fetch_branch_sha
+
+    refine_base_sha = await fetch_branch_sha(
+        owner, repo_name, target_branch, token=token
+    )
+    refine_mismatch = await dry_run_patch_at_sha(
+        owner=owner,
+        repo=repo_name,
+        patch_text=patch_text,
+        base_sha=refine_base_sha,
+        token=token,
+    )
+    if refine_mismatch is not None:
+        raise GitHubPRValidationError(
+            f"Refined patch does not apply to {target_branch}: {refine_mismatch}"
+        )
+    return refine_base_sha
+
+
+async def _resolve_phase_base_sha(
+    *,
+    owner: str,
+    repo_name: str,
+    base_branch: str,
+    pinned_sha: str,
+    run_id: uuid.UUID,
+    token: str,
+    decisions: list[str],
+) -> str:
+    """F5: resolve the base-branch HEAD fresh instead of the intake pin.
+
+    Best-effort: on lookup failure returns the pinned SHA and records
+    pr_base_sha_refresh_failed; on change records pr_base_sha_refreshed.
+    """
+    from app.github_client import fetch_branch_sha
+
+    try:
+        phase_base_sha = await fetch_branch_sha(
+            owner, repo_name, base_branch, token=token
+        )
+    except Exception as sha_exc:
+        logger.warning(
+            "orchestrator: run=%s base-SHA refresh failed "
+            "(%s) — dry-running against intake SHA",
+            run_id,
+            type(sha_exc).__name__,
+        )
+        decisions.append("pr_base_sha_refresh_failed")
+        return pinned_sha
+    if phase_base_sha != pinned_sha:
+        decisions.append("pr_base_sha_refreshed")
+    return phase_base_sha
+
+
+def _pr_dry_run_feedback(
+    *, mismatch: str, validation_error: Optional[str]
+) -> str:
+    """Phase-8 regen feedback: format errors get the format correction.
+
+    A structurally invalid patch failed strict validation, so the regen must
+    quote well-formed headers — not byte-exact lines (there is no valid hunk
+    to quote yet). A dry-run mismatch keeps the byte-exact feedback.
+    """
+    if validation_error is not None:
+        return (
+            "The verified patch is NOT a valid unified "
+            f"diff: {mismatch} Regenerate the complete "
+            "patch with well-formed '---'/'+++', '@@' "
+            "headers whose hunk bodies exactly meet "
+            "their declared line counts."
+        )
+    return (
+        "The verified patch does NOT apply to the "
+        f"target branch: {mismatch} "
+        "Every '-' and ' ' (context) line must be a "
+        "byte-exact quote of the target file -- copy, "
+        "never paraphrase. Regenerate the full patch "
+        "with the quoted lines corrected."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Pipeline body (Phase 1 — extracted to wrap in asyncio.wait_for)
 # ---------------------------------------------------------------------------
 
@@ -1377,37 +1479,26 @@ async def _orchestrator_pipeline_body(
                     # user's own branch.
                     if is_pr_refinement(run):
                         try:
-                            from app.github.pr import (
-                                GitHubPRValidationError,
-                                commit_patch,
-                                dry_run_patch_at_sha,
-                                get_installation_token,
-                            )
-                            from app.github_client import fetch_branch_sha
+                            from app.github.pr import commit_patch, get_installation_token
 
                             token = await get_installation_token(repo)
                             target_branch = run.pr_branch or run.head_branch
 
-                            # F4 pre-check: the same fail-closed dry-run as the
-                            # main path (it also strict-validates, so a
-                            # truncated refined patch fails here, not at
-                            # commit time). Raises into the handler below —
-                            # no commit, no silent pass.
-                            refine_base_sha = await fetch_branch_sha(
-                                repo.owner, repo.name, target_branch, token=token
-                            )
-                            refine_mismatch = await dry_run_patch_at_sha(
+                            # F4 pre-check: same fail-closed dry-run as the main
+                            # path (it also strict-validates, so a truncated
+                            # refined patch fails here, not at commit time).
+                            # No regen on mismatch, unlike Phase 8: the
+                            # refinement already spent its regen answering
+                            # reviewer feedback, so a mismatch means the base
+                            # moved under a just-verified patch and must
+                            # surface as an error, not another generation.
+                            await _ensure_refinement_applies(
                                 owner=repo.owner,
-                                repo=repo.name,
+                                repo_name=repo.name,
+                                target_branch=target_branch,
                                 patch_text=attempt.patch_text,
-                                base_sha=refine_base_sha,
                                 token=token,
                             )
-                            if refine_mismatch is not None:
-                                raise GitHubPRValidationError(
-                                    "Refined patch does not apply to "
-                                    f"{target_branch}: {refine_mismatch}"
-                                )
                             pr_number = run.pr_number
 
                             # Conversational `test-fix` (conclusion == "test-fix"):
@@ -1567,24 +1658,15 @@ async def _orchestrator_pipeline_body(
                         # between intake and Phase 8 otherwise surfaces as a
                         # spurious dry-run mismatch. Best-effort: on lookup
                         # failure keep the pinned SHA and tag the decision.
-                        from app.github_client import fetch_branch_sha
-
-                        phase_base_sha = run.head_sha
-                        try:
-                            phase_base_sha = await fetch_branch_sha(
-                                repo.owner, repo.name, base_branch, token=token
-                            )
-                        except Exception as sha_exc:
-                            logger.warning(
-                                "orchestrator: run=%s base-SHA refresh failed "
-                                "(%s) — dry-running against intake SHA",
-                                run_id,
-                                type(sha_exc).__name__,
-                            )
-                            state["decisions"].append("pr_base_sha_refresh_failed")
-                        else:
-                            if phase_base_sha != run.head_sha:
-                                state["decisions"].append("pr_base_sha_refreshed")
+                        phase_base_sha = await _resolve_phase_base_sha(
+                            owner=repo.owner,
+                            repo_name=repo.name,
+                            base_branch=base_branch,
+                            pinned_sha=run.head_sha,
+                            run_id=run_id,
+                            token=token,
+                            decisions=state["decisions"],
+                        )
 
                         # Validate before create_branch: an invalid patch must
                         # not leave an orphan branch pointing at HEAD.
@@ -1630,23 +1712,10 @@ async def _orchestrator_pipeline_body(
                                 mismatch,
                             )
                             state["decisions"].append("pr_dry_run_mismatch_regen")
-                            if validation_error is not None:
-                                dry_run_feedback = (
-                                    "The verified patch is NOT a valid unified "
-                                    f"diff: {mismatch} Regenerate the complete "
-                                    "patch with well-formed '---'/'+++', '@@' "
-                                    "headers whose hunk bodies exactly meet "
-                                    "their declared line counts."
-                                )
-                            else:
-                                dry_run_feedback = (
-                                    "The verified patch does NOT apply to the "
-                                    f"target branch: {mismatch} "
-                                    "Every '-' and ' ' (context) line must be a "
-                                    "byte-exact quote of the target file -- copy, "
-                                    "never paraphrase. Regenerate the full patch "
-                                    "with the quoted lines corrected."
-                                )
+                            dry_run_feedback = _pr_dry_run_feedback(
+                                mismatch=mismatch,
+                                validation_error=validation_error,
+                            )
                             attempt = await generate_fix(
                                 run=run,
                                 diagnosis_summary=run.diagnosis_summary or "",

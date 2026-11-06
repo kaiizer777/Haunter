@@ -15,19 +15,30 @@ test_followup_reply), not here.
 
 from __future__ import annotations
 
+import base64
 import json
 import uuid
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
+import respx
 
+from app.github.pr import GitHubPRValidationError, dry_run_patch_at_sha
+from app.orchestrator import (
+    _ensure_refinement_applies,
+    _pr_dry_run_feedback,
+    _resolve_phase_base_sha,
+)
 from app.subagents.fix_generator import (
+    _FIX_MAX_TOKENS,
     FixGenerationError,
     FixOutputTruncatedError,
     PatchFormatRejected,
     PatchRejected,
     _call_and_parse,
     _call_with_format_retry,
+    _detect_truncation,
     _provider_reported_truncation,
     _reported_finish_reason,
     _validate_patch,
@@ -149,8 +160,7 @@ async def test_length_truncation_raises_without_retry_or_store() -> None:
     assert mock_complete.call_count == 1
 
 
-@pytest.mark.anyio
-async def test_truncation_error_stays_a_generation_error() -> None:
+def test_truncation_error_stays_a_generation_error() -> None:
     assert issubclass(FixOutputTruncatedError, FixGenerationError)
 
 
@@ -256,7 +266,7 @@ def test_gate_rejects_modification_of_missing_file() -> None:
     from app.sandbox.mirror import _fail_closed_push_gate
 
     ghost = "--- a/ghost.py\n+++ b/ghost.py\n@@ -1 +1 @@\n-x\n+y\n"
-    with pytest.raises(ValueError, match="does not apply"):
+    with pytest.raises(ValueError, match="missing from the mirrored tree"):
         _fail_closed_push_gate(ghost, dict(SEEDS))
 
 
@@ -305,6 +315,261 @@ async def test_push_fails_before_any_write_on_fuzzy_only_patch() -> None:
                     seed_files=dict(SEEDS),
                 )
     assert not rx.calls
+
+
+# ------------------------------------------------- #281b: gate fail-close ---
+# Deletion bodies run the fail-closed applier; missing paths pass only for
+# true creations. All hermetic: pure functions, no DB, no network.
+
+WRONG_CONTEXT_DELETION = (
+    "--- a/app.py\n"
+    "+++ /dev/null\n"
+    "@@ -1,3 +0,0 @@\n"
+    "-line1\n"
+    "-WRONG\n"
+    "-line3\n"
+)
+
+FULL_DELETION = (
+    "--- a/app.py\n"
+    "+++ /dev/null\n"
+    "@@ -1,3 +0,0 @@\n"
+    "-line1\n"
+    "-line2\n"
+    "-line3\n"
+)
+
+GHOST_ADDITION = (
+    "--- a/ghost.py\n"
+    "+++ b/ghost.py\n"
+    "@@ -0,0 +1 @@\n"
+    "+hello\n"
+)
+
+
+def test_gate_rejects_wrong_context_deletion() -> None:
+    """A deletion whose '-' lines mismatch the tree is rejected, not counted."""
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    with pytest.raises(ValueError, match="does not apply"):
+        _fail_closed_push_gate(WRONG_CONTEXT_DELETION, dict(SEEDS))
+
+
+def test_gate_accepts_exact_deletion() -> None:
+    """An exactly-quoted deletion applies (empty result is not a mismatch)."""
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    _fail_closed_push_gate(FULL_DELETION, dict(SEEDS))
+
+
+def test_gate_rejects_non_creation_patch_for_missing_path() -> None:
+    """A pure addition naming a missing path passes only as --- /dev/null."""
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    with pytest.raises(ValueError, match="missing from the mirrored tree"):
+        _fail_closed_push_gate(GHOST_ADDITION, dict(SEEDS))
+
+
+# ------------------------------------------------- #280b: second layer ---
+# finish_reason absent + whole output budget spent => inferred truncation.
+# Reported reasons keep their verdict; a successful parse clears suspicion.
+
+
+def test_detect_truncation_needs_positive_evidence() -> None:
+    assert _detect_truncation({"finish_reason": "length"}, 100) == "length"
+    assert _detect_truncation({"finish_reason": "stop"}, 100) is None
+    full = {"usage": {"output_tokens": 100}}
+    assert (
+        _detect_truncation(full, 100) == "length (inferred from usage.output_tokens)"
+    )
+    assert _detect_truncation({"usage": {"output_tokens": 10}}, 100) is None
+    assert _detect_truncation({}, 100) is None
+
+
+@pytest.mark.anyio
+async def test_none_reason_full_budget_cut_raises_without_retry() -> None:
+    """Reason-less response that fills the budget and fails to parse is cut."""
+    bad = {
+        "content": "not json",
+        "usage": {"input_tokens": 1, "output_tokens": _FIX_MAX_TOKENS},
+    }
+    mock_complete = AsyncMock(return_value=bad)
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(FixOutputTruncatedError),
+    ):
+        await _call_and_parse(
+            messages=[{"role": "system", "content": "sys"}],
+            diagnosis_summary="ImportError in app.py",
+            prior_attempt=None,
+            db=AsyncMock(),
+            run_id=uuid.uuid4(),
+        )
+    assert mock_complete.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_full_budget_valid_parse_still_returns() -> None:
+    """A full-budget response that parses was complete; suspicion is dropped."""
+    good = _llm_response(VALID_PATCH)
+    good["usage"] = {"input_tokens": 10, "output_tokens": _FIX_MAX_TOKENS}
+    mock_complete = AsyncMock(return_value=good)
+    with patch("app.subagents.fix_generator.LLMClient.complete", mock_complete):
+        output, _ = await _call_and_parse(
+            messages=[{"role": "system", "content": "sys"}],
+            diagnosis_summary="ImportError in app.py",
+            prior_attempt=None,
+            db=AsyncMock(),
+            run_id=uuid.uuid4(),
+        )
+    assert output.confidence == 80
+    assert mock_complete.call_count == 1
+
+
+# ------------------------------------------------- #282: F4/F5/FB -------
+# Hermetic orchestrator-guard tests: helpers + respx, no DB, no full run.
+
+
+@pytest.mark.anyio
+async def test_refinement_precheck_mismatch_raises_without_commit() -> None:
+    """A stale refined patch raises before commit_patch is ever reached."""
+    with (
+        patch(
+            "app.github_client.fetch_branch_sha", AsyncMock(return_value="f" * 40)
+        ),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            AsyncMock(return_value="patch does not apply to app.py"),
+        ),
+        patch("app.github.pr.commit_patch", AsyncMock()) as mock_commit,
+        pytest.raises(GitHubPRValidationError),
+    ):
+        await _ensure_refinement_applies(
+            owner="o",
+            repo_name="r",
+            target_branch="main",
+            patch_text=VALID_PATCH,
+            token="tok",
+        )
+    mock_commit.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_refinement_precheck_clean_returns_sha() -> None:
+    with (
+        patch(
+            "app.github_client.fetch_branch_sha", AsyncMock(return_value="f" * 40)
+        ),
+        patch("app.github.pr.dry_run_patch_at_sha", AsyncMock(return_value=None)),
+    ):
+        sha = await _ensure_refinement_applies(
+            owner="o",
+            repo_name="r",
+            target_branch="main",
+            patch_text=VALID_PATCH,
+            token="tok",
+        )
+    assert sha == "f" * 40
+
+
+@pytest.mark.anyio
+async def test_phase_base_sha_refresh_changed() -> None:
+    decisions: list[str] = []
+    with patch(
+        "app.github_client.fetch_branch_sha", AsyncMock(return_value="n" * 40)
+    ):
+        sha = await _resolve_phase_base_sha(
+            owner="o",
+            repo_name="r",
+            base_branch="main",
+            pinned_sha="p" * 40,
+            run_id=uuid.uuid4(),
+            token="tok",
+            decisions=decisions,
+        )
+    assert sha == "n" * 40
+    assert decisions == ["pr_base_sha_refreshed"]
+
+
+@pytest.mark.anyio
+async def test_phase_base_sha_refresh_failed_falls_back() -> None:
+    decisions: list[str] = []
+    with patch(
+        "app.github_client.fetch_branch_sha",
+        AsyncMock(side_effect=RuntimeError("dns")),
+    ):
+        sha = await _resolve_phase_base_sha(
+            owner="o",
+            repo_name="r",
+            base_branch="main",
+            pinned_sha="p" * 40,
+            run_id=uuid.uuid4(),
+            token="tok",
+            decisions=decisions,
+        )
+    assert sha == "p" * 40
+    assert decisions == ["pr_base_sha_refresh_failed"]
+
+
+@pytest.mark.anyio
+async def test_stale_mismatch_passes_at_refreshed_sha() -> None:
+    """The same patch mismatches the stale pin but applies at the fresh HEAD."""
+    stale_sha, fresh_sha = "0" * 40, "1" * 40
+    stale_body = base64.b64encode(b"line1\nSTALE\nline3\n").decode("ascii")
+    fresh_body = base64.b64encode(b"line1\nline2\nline3\n").decode("ascii")
+    with respx.mock(
+        base_url="https://api.github.com", assert_all_called=False
+    ) as rx:
+        rx.get(f"/repos/o/r/contents/app.py?ref={stale_sha}").mock(
+            return_value=httpx.Response(200, json={"content": stale_body})
+        )
+        rx.get(f"/repos/o/r/contents/app.py?ref={fresh_sha}").mock(
+            return_value=httpx.Response(200, json={"content": fresh_body})
+        )
+        stale_mismatch = await dry_run_patch_at_sha(
+            owner="o", repo="r", patch_text=VALID_PATCH, base_sha=stale_sha,
+            token="tok",
+        )
+        decisions: list[str] = []
+        with patch(
+            "app.github_client.fetch_branch_sha", AsyncMock(return_value=fresh_sha)
+        ):
+            resolved = await _resolve_phase_base_sha(
+                owner="o",
+                repo_name="r",
+                base_branch="main",
+                pinned_sha=stale_sha,
+                run_id=uuid.uuid4(),
+                token="tok",
+                decisions=decisions,
+            )
+        fresh_mismatch = await dry_run_patch_at_sha(
+            owner="o", repo="r", patch_text=VALID_PATCH, base_sha=resolved,
+            token="tok",
+        )
+    assert stale_mismatch is not None
+    assert decisions == ["pr_base_sha_refreshed"]
+    assert fresh_mismatch is None
+
+
+def test_structurally_invalid_patch_gets_format_feedback() -> None:
+    """Validation failures regen with header-format feedback, not byte-exact."""
+    feedback = _pr_dry_run_feedback(
+        mismatch="patch is not a valid unified diff: short hunk",
+        validation_error="short hunk",
+    )
+    assert "NOT a valid unified diff" in feedback
+    assert "'---'/'+++'" in feedback
+    assert "@@" in feedback
+    assert "byte-exact" not in feedback
+
+
+def test_apply_mismatch_keeps_byte_exact_feedback() -> None:
+    feedback = _pr_dry_run_feedback(
+        mismatch="patch does not apply to app.py", validation_error=None
+    )
+    assert "does NOT apply" in feedback
+    assert "byte-exact" in feedback
 
 
 @pytest.mark.anyio
