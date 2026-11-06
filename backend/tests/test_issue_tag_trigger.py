@@ -1044,6 +1044,8 @@ async def test_gather_issue_context_mints_installation_token():
     assert mock_mint.await_args.args[0] is repo
     assert mock_issue.await_args.kwargs["token"] == "install-tok"
     assert mock_issue.await_args.kwargs["allow_global_token"] is False
+    assert mock_comments.await_args.kwargs["token"] == "install-tok"
+    assert mock_comments.await_args.kwargs["allow_global_token"] is False
     assert mock_tree.await_args.kwargs["token"] == "install-tok"
     assert mock_tree.await_args.kwargs["allow_global_token"] is False
 
@@ -1078,6 +1080,8 @@ async def test_gather_issue_context_token_mint_failure_continues():
     assert summary == "diagnosis summary"
     assert mock_issue.await_args.kwargs["token"] is None
     assert mock_issue.await_args.kwargs["allow_global_token"] is False
+    assert mock_comments.await_args.kwargs["token"] is None
+    assert mock_comments.await_args.kwargs["allow_global_token"] is False
 
 # ---------------------------------------------------------------------------
 # Auditor fix-trigger routing (feat-251, issue #254)

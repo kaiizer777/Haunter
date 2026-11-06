@@ -132,8 +132,9 @@ def test_build_headers_custom_accept():
     assert headers["X-GitHub-Api-Version"] == "2022-11-28"
 
 
-def test_build_headers_fail_closed_no_token():
-    """allow_global_token=False with no token raises GitHubAuthError."""
+def test_build_headers_fail_closed_no_token(monkeypatch: pytest.MonkeyPatch):
+    """allow_global_token=False raises even when settings.github_token is set."""
+    monkeypatch.setattr(settings, "github_token", "env_secret_token")
     import pytest as _pytest
 
     with _pytest.raises(GitHubAuthError):
