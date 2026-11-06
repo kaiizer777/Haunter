@@ -47,6 +47,7 @@ from app.github_client import (
     fetch_diff,
     fetch_issue,
     fetch_issue_comments,
+    fetch_repo_tree_paths,
     fetch_issue_timeline,
     fetch_workflow_run_logs,
     post_commit_comment,
@@ -129,6 +130,47 @@ def test_build_headers_custom_accept():
     assert headers["Authorization"] == "Bearer tok"
     assert headers["User-Agent"] == "Haunter-Autonomous-Agent/1.0"
     assert headers["X-GitHub-Api-Version"] == "2022-11-28"
+
+
+def test_build_headers_fail_closed_no_token(monkeypatch: pytest.MonkeyPatch):
+    """allow_global_token=False raises even when settings.github_token is set."""
+    monkeypatch.setattr(settings, "github_token", "env_secret_token")
+    import pytest as _pytest
+
+    with _pytest.raises(GitHubAuthError):
+        _build_headers(token=None, allow_global_token=False)
+
+
+def test_build_headers_fail_closed_global_pat_only(monkeypatch: pytest.MonkeyPatch):
+    """Only settings.github_token configured + allow_global_token=False raises and issues no HTTP request."""
+    monkeypatch.setattr(settings, "github_token", "env_secret_token")
+    import httpx as _httpx
+    from unittest.mock import patch
+
+    with patch("httpx.AsyncClient") as mock_client:
+        with pytest.raises(GitHubAuthError):
+            _build_headers(token=None, allow_global_token=False)
+        mock_client.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# fetch_repo_tree_paths tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fetch_repo_tree_paths_accepts_allow_global_token():
+    """fetch_repo_tree_paths forwards allow_global_token to _build_headers."""
+    import respx as _respx
+
+    with _respx.mock(assert_all_called=True) as router:
+        router.get(f"{GITHUB_API_BASE}/repos/o/r/git/trees/abc?recursive=1").mock(
+            return_value=httpx.Response(200, json={"tree": [{"path": "a.py", "type": "blob"}]})
+        )
+        paths = await fetch_repo_tree_paths(
+            owner="o", repo="r", sha="abc", token="tok", allow_global_token=False
+        )
+    assert paths == ["a.py"]
 
 
 # ---------------------------------------------------------------------------

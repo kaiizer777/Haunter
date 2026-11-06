@@ -1073,12 +1073,20 @@ _ISSUE_DISCUSSION_BUDGET = 3
 
 
 async def _fetch_issue_discussion(
-    owner: str, repo: str, issue_number: int
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """One bounded page of issue comments as plain dicts (empty on refusal)."""
     budget = gh.GitHubRequestBudget(limit=_ISSUE_DISCUSSION_BUDGET)
     page = await gh.fetch_issue_comments(
-        owner=owner, repo=repo, issue_number=issue_number, budget=budget
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        budget=budget,
+        token=token,
+        allow_global_token=False,
     )
     if isinstance(page, gh.IssueCommentPage):
         return [c for c in page.comments if isinstance(c, dict)]
@@ -1198,13 +1206,30 @@ async def gather_issue_context(
     owner = repo.owner
     name = repo.name
 
+    token: Optional[str] = None
+    try:
+        from app.config import settings
+        from app.github.pr import get_installation_token
+
+        minted = await get_installation_token(repo)
+        if minted and minted != settings.github_token:
+            token = minted
+    except Exception:
+        token = None
+
     issue_raw, comments_raw = await asyncio.gather(
         _safe_fetch(
-            gh.fetch_issue(owner=owner, repo=name, issue_number=issue_number),
+            gh.fetch_issue(
+                owner=owner,
+                repo=name,
+                issue_number=issue_number,
+                token=token,
+                allow_global_token=False,
+            ),
             label="issue",
         ),
         _safe_fetch(
-            _fetch_issue_discussion(owner, name, issue_number),
+            _fetch_issue_discussion(owner, name, issue_number, token=token),
             label="issue_comments",
         ),
     )
@@ -1238,7 +1263,11 @@ async def gather_issue_context(
 
     try:
         tree_paths = await gh.fetch_repo_tree_paths(
-            owner=owner, repo=name, sha=run.head_sha
+            owner=owner,
+            repo=name,
+            sha=run.head_sha,
+            token=token,
+            allow_global_token=False,
         )
     except Exception as exc:
         logger.warning(
