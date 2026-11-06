@@ -1475,3 +1475,38 @@ async def test_commit_patch_with_deletion_404_does_not_trigger_fallback() -> Non
     assert len(tree_entries) == 1
     assert tree_entries[0]["path"] == "hello.py"
     assert tree_entries[0]["sha"] == "blob_sha_hello"
+
+
+def test_apply_unified_diff_no_newline_marker_at_true_hunk_end_strips() -> None:
+    """A marker after '+' at the true end of the hunk strips the newline."""
+    original = "a\nb"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB"
+
+
+def test_apply_unified_diff_no_newline_marker_mid_hunk_ignored() -> None:
+    """A marker with hunk content following it is ignored (no concatenation).
+
+    Malformed model output placing the EOF marker mid-hunk must not strip
+    the preceding '+' line: stripping would concatenate it with the next
+    added line in the committed content.
+    """
+    original = "a\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,1 +1,3 @@\n"
+        " a\n"
+        "+b\n"
+        "\\ No newline at end of file\n"
+        "+c\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nb\nc\n"
