@@ -1152,7 +1152,19 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     # the skipped original line (nothing emitted); after ' '
                     # the emitted original line already carries the
                     # original's own (absent) ending.
-                    if prev_kind == "+" and new_lines:
+                    # The marker is only honored at the actual end of the
+                    # hunk: a marker with further ' '/'−'/'+' content lines
+                    # after it in the same hunk is malformed model output and
+                    # is ignored, so stripping can never concatenate an added
+                    # line with the content that follows the stray marker.
+                    at_hunk_end = True
+                    for nxt in lines[i + 1 :]:
+                        if nxt.startswith("@@"):
+                            break
+                        if nxt[:1] in (" ", "-", "+"):
+                            at_hunk_end = False
+                            break
+                    if prev_kind == "+" and at_hunk_end and new_lines:
                         last = new_lines[-1]
                         if last.endswith("\r\n"):
                             new_lines[-1] = last[:-2]
