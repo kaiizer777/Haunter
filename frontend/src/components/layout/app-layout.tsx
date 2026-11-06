@@ -6,6 +6,7 @@ import { useAuth } from "@/lib/auth-context";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 
 interface AppLayoutProps {
   children: React.ReactNode;
@@ -13,6 +14,7 @@ interface AppLayoutProps {
   subtitle?: string;
   actions?: React.ReactNode;
   noPadding?: boolean;
+  fullHeight?: boolean;
 }
 
 export function AppLayout({
@@ -21,6 +23,7 @@ export function AppLayout({
   subtitle,
   actions,
   noPadding = false,
+  fullHeight = false,
 }: AppLayoutProps) {
   const { user, loading } = useAuth();
   const router = useRouter();
@@ -33,7 +36,12 @@ export function AppLayout({
 
   if (loading) {
     return (
-      <div className="flex min-h-screen bg-[#09090b]">
+      <div
+        className={cn(
+          "flex bg-[#09090b]",
+          fullHeight ? "h-screen supports-[height:100dvh]:h-dvh overflow-hidden" : "min-h-screen"
+        )}
+      >
         {/* Skeleton Sidebar */}
         <div className="w-[240px] border-r border-zinc-800 bg-[#0c0c0e] p-3.5 space-y-3.5">
           <div className="flex items-center gap-3">
@@ -67,14 +75,33 @@ export function AppLayout({
   }
 
   return (
-    <div className="min-h-screen bg-[#09090b] text-zinc-100 flex flex-row">
+    <div
+      className={cn(
+        "bg-[#09090b] text-zinc-100 flex flex-row",
+        fullHeight ? "h-screen supports-[height:100dvh]:h-dvh overflow-hidden" : "min-h-screen"
+      )}
+    >
       {/* Fixed Sidebar */}
       <Sidebar />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 pl-[240px] min-h-screen">
+      <div
+        className={cn(
+          "flex-1 flex flex-col min-w-0 pl-[240px]",
+          fullHeight ? "h-full overflow-hidden" : "min-h-screen"
+        )}
+      >
         <Topbar title={title} subtitle={subtitle} actions={actions} />
-        <main className={`flex-1 min-w-0 ${noPadding ? "p-0 flex flex-col overflow-hidden" : "p-5 overflow-y-auto"}`}>
+        <main
+          className={cn(
+            "flex-1 min-w-0",
+            fullHeight
+              ? "min-h-0 p-5 flex flex-col overflow-hidden"
+              : noPadding
+              ? "p-0 flex flex-col overflow-hidden"
+              : "p-5 overflow-y-auto"
+          )}
+        >
           {children}
         </main>
       </div>

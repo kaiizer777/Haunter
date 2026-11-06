@@ -147,4 +147,44 @@ describe("app-layout.tsx", () => {
     expect(screen.getByRole("heading", { name: "Custom Title" })).toBeInTheDocument();
     expect(screen.getByText("Repo table")).toBeInTheDocument();
   });
+
+  it("supports fullHeight bounding mode for docked split layouts", () => {
+    vi.mocked(useAuth).mockReturnValue({
+      user: mockUser,
+      loading: false,
+      error: null,
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+
+    const { container, rerender } = render(
+      <AppLayout title="Code Reviews" fullHeight>
+        <div data-testid="split-layout">Split View</div>
+      </AppLayout>
+    );
+
+    const rootWrapper = container.firstChild as HTMLElement;
+    expect(rootWrapper).toHaveClass("h-screen");
+    expect(rootWrapper).toHaveClass("supports-[height:100dvh]:h-dvh");
+    expect(rootWrapper).toHaveClass("overflow-hidden");
+
+    const mainElement = screen.getByRole("main");
+    expect(mainElement).toHaveClass("min-h-0");
+    expect(mainElement).toHaveClass("p-5");
+    expect(mainElement).toHaveClass("flex");
+    expect(mainElement).toHaveClass("flex-col");
+    expect(mainElement).toHaveClass("overflow-hidden");
+
+    // Standard unconstrained mode
+    rerender(
+      <AppLayout title="Code Reviews" fullHeight={false}>
+        <div data-testid="split-layout">List View</div>
+      </AppLayout>
+    );
+    expect(rootWrapper).toHaveClass("min-h-screen");
+    expect(rootWrapper).not.toHaveClass("supports-[height:100dvh]:h-dvh");
+    expect(rootWrapper).not.toHaveClass("h-screen");
+    expect(mainElement).toHaveClass("p-5");
+    expect(mainElement).toHaveClass("overflow-y-auto");
+  });
 });

@@ -375,7 +375,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     expect(await screen.findByText("PR Summary")).toBeInTheDocument();
     expect(screen.getByText("Great to Merge")).toBeInTheDocument();
     expectConfidence(9);
-    expect(screen.getByText(/no regressions detected/i)).toBeInTheDocument();
+    expect(screen.getByText("No findings recorded")).toBeInTheDocument();
   });
 
   it("staged fixes stay visible in the detail view", async () => {
@@ -883,7 +883,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
       expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
       // Both rows scored (85 + 85) — the saved audit is not dropped from the mean.
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab).toHaveTextContent("85");
       expect(avgTab.textContent).toMatch(/2 scored/i);
       // The banner reads "N failed analyses": a completed analysis with a
@@ -1035,7 +1035,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Analyzing")).toHaveLength(2);
       expect(screen.queryByText("Great to Merge")).not.toBeInTheDocument();
 
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       // 85 alone — the unscored 0 must not pollute the mean.
       expect(avgTab).toHaveTextContent("85");
       expect(avgTab.textContent).not.toMatch(/43/);
@@ -1137,7 +1137,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
 
       expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       // (85+15)/2 = 50 — the pending 0 must not pollute the mean (would be 33).
       expect(avgTab).toHaveTextContent("50");
       expect(avgTab.textContent).not.toMatch(/33/);
@@ -1178,7 +1178,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByText("Review Advised")).not.toBeInTheDocument();
       // No saved audit, so no publication indicator and no unscored mean.
       expect(screen.queryByText("Publication skipped")).not.toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab.textContent).toMatch(/no scored reviews/i);
     });
 
@@ -1240,7 +1240,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Publication skipped").length).toBeGreaterThanOrEqual(1);
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
       // Avg Risk counts it: (85+0)/2 = 43 across 2 scored.
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(avgTab).toHaveTextContent("43");
       expect(avgTab.textContent).toMatch(/2 scored/i);
     });
@@ -1271,7 +1271,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.getAllByText("Great to Merge").length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText("Publication skipped")).toBeInTheDocument();
       expect(screen.queryByText("NO SCORE")).not.toBeInTheDocument();
-      const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+      const avgTab = screen.getByTestId("avg-risk-tile");
       expect(screen.getByTitle(/Mean of 1 scored review/)).toHaveTextContent(/^0 \/ 100$/);
       expect(avgTab.textContent).toMatch(/1 scored/i);
     });
@@ -1309,7 +1309,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
 
     expect(await screen.findByText("feat: autonomous remediation sentinel pipeline")).toBeInTheDocument();
 
-    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    const avgTab = screen.getByTestId("avg-risk-tile");
     // 85 alone — not (85+0)/2 = 43.
     expect(avgTab).toHaveTextContent("85");
     expect(avgTab.textContent).not.toMatch(/43/);
@@ -1344,7 +1344,7 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
     render(<ReviewsPage />);
 
     expect(await screen.findByText("PR #103")).toBeInTheDocument();
-    const avgTab = screen.getByText(/avg risk/i).closest("button")!;
+    const avgTab = screen.getByTestId("avg-risk-tile");
     expect(avgTab.textContent).toMatch(/no scored reviews/i);
     expect(avgTab.querySelector("span.text-zinc-500")).toHaveTextContent("—");
   });
@@ -1943,7 +1943,11 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       render(<ReviewsPage />);
       await screen.findByText("first failure");
       // One cause stated once is noise — the row already says it in full.
-      expect(screen.queryByText(/failed analysis/i)).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("status", {
+          name: /failed analyses root cause summary/i,
+        })
+      ).not.toBeInTheDocument();
       expect(screen.getByText("Provider quota exhausted (9 attempts)")).toBeInTheDocument();
     });
 
@@ -2120,6 +2124,75 @@ describe("ReviewsPage (app/reviews/page.tsx)", () => {
       expect(screen.queryByRole("button", { name: /clear filters/i })).not.toBeInTheDocument();
       // Not the sibling "filtered everything away" branch.
       expect(screen.queryByText(/nothing matches these filters/i)).not.toBeInTheDocument();
+    });
+
+    it("docks desktop split view to full viewport height without bottom clipping or blank void", async () => {
+      const originalMatchMedia = window.matchMedia;
+      window.matchMedia = vi.fn().mockImplementation((query) => ({
+        matches: query === "(min-width: 1280px)",
+        media: query,
+        onchange: null,
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }));
+
+      const activeReview = row({ id: "rev_dock_1", pr_title: "docking check" });
+      vi.mocked(api.getCodeReviews).mockResolvedValue({
+        reviews: [activeReview],
+        total: 1,
+      });
+      vi.mocked(api.getReviewDetail).mockResolvedValue(activeReview);
+
+      window.history.pushState({}, "", "/reviews?review=rev_dock_1");
+      const { container } = render(<ReviewsPage />);
+
+      expect(await screen.findByText("docking check")).toBeInTheDocument();
+
+      const gridContainer = container.querySelector(".xl\\:grid-cols-12");
+      expect(gridContainer).not.toBeNull();
+      expect(gridContainer?.className).toContain("flex-1");
+      expect(gridContainer?.className).toContain("min-h-0");
+      expect(gridContainer?.className).toContain("xl:overflow-hidden");
+      expect(gridContainer?.className).not.toContain("xl:h-[calc(100vh-140px)]");
+
+      const outerWrapper = gridContainer?.parentElement;
+      expect(outerWrapper?.className).toContain("flex-1");
+      expect(outerWrapper?.className).toContain("min-h-0");
+      expect(outerWrapper?.className).toContain("flex");
+      expect(outerWrapper?.className).toContain("flex-col");
+      expect(outerWrapper?.className).not.toContain("pb-12");
+
+      const leftPane = gridContainer?.querySelector(".xl\\:col-span-5");
+      expect(leftPane?.className).toContain("xl:h-full");
+      expect(leftPane?.className).toContain("xl:min-h-0");
+      expect(leftPane?.className).toContain("flex");
+      expect(leftPane?.className).toContain("flex-col");
+      expect(leftPane?.className).toContain("rounded-xl");
+      expect(leftPane?.className).toContain("overflow-hidden");
+
+      const leftScroll = leftPane?.querySelector(".overflow-y-auto");
+      expect(leftScroll).not.toBeNull();
+      expect(leftScroll?.className).toContain("flex-1");
+      expect(leftScroll?.className).toContain("min-h-0");
+
+      const rightPane = gridContainer?.querySelector(".xl\\:col-span-7");
+      expect(rightPane?.className).toContain("xl:h-full");
+      expect(rightPane?.className).toContain("xl:min-h-0");
+      expect(rightPane?.className).toContain("flex");
+      expect(rightPane?.className).toContain("flex-col");
+      expect(rightPane?.className).toContain("rounded-xl");
+      expect(rightPane?.className).toContain("overflow-hidden");
+
+      const rightScroll = rightPane?.querySelector(".overflow-y-auto");
+      expect(rightScroll).not.toBeNull();
+      expect(rightScroll?.className).toContain("flex-1");
+      expect(rightScroll?.className).toContain("min-h-0");
+
+      window.matchMedia = originalMatchMedia;
+      window.history.pushState({}, "", "/reviews");
     });
   });
 });
