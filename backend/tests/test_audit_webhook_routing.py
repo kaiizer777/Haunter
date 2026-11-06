@@ -66,7 +66,7 @@ from app.github_client import (
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
 )
-from app.models import AuditJob, Repo, RepoSettings, WebhookDelivery
+from app.models import AuditJob, Repo, RepoSettings, Run, WebhookDelivery
 from app.services import audit_pipeline
 from app.services.audit_pipeline import AuditorTriggerSettings
 from tests.conftest import async_session_maker, truncate_all
@@ -3617,3 +3617,66 @@ async def test_kill_switch_lookup_db_error_leaves_job_recoverable_dispatching(
     assert job is not None
     assert job.status == "dispatching"
     assert job.last_error != audit_pipeline.AUDITOR_DISABLED_ERROR
+
+# ---------------------------------------------------------------------------
+# Auditor fix-trigger routing on issues (feat-251, issue #254)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_issue_mixed_fix_phrase_and_audit_posts_ambiguous_only(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+):
+    """Mixed exact fix phrase + audit request on an issue: ambiguous comment only.
+
+    v1: neither a fix Run nor a manual audit is dispatched for the mixed
+    request; a single best-effort comment names the ambiguity.
+    """
+    repo = await seed_repo(
+        fake_audit_db, fake_audit_user_factory, "mixed-org", "mixed-repo"
+    )
+    payload = {
+        "action": "opened",
+        "issue": {
+            "number": 61,
+            "title": "@haunter-auditor fix this issue",
+            "body": "@haunter-auditor audit this PR for regressions",
+            "author_association": "MEMBER",
+            "user": {"login": "senior-reviewer"},
+        },
+        "repository": {
+            "name": "mixed-repo",
+            "full_name": "mixed-org/mixed-repo",
+            "owner": {"login": "mixed-org"},
+        },
+        "sender": {"login": "senior-reviewer", "type": "User"},
+    }
+    with (
+        patch("app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock) as mock_get,
+        patch("app.github.pr.get_installation_token", new_callable=AsyncMock) as mock_tok,
+        patch("app.github_client.fetch_branch_sha", new_callable=AsyncMock) as mock_sha,
+        patch("app.github_client.create_issue_comment", new_callable=AsyncMock) as mock_post,
+    ):
+        adapter = MagicMock()
+        adapter.schedule_pipeline = AsyncMock()
+        mock_get.return_value = adapter
+        mock_tok.return_value = "test-installation-token"
+        mock_sha.return_value = "b" * 40
+        resp = await post_signed(client, "issues", payload)
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ignored", "reason": "ambiguous auditor request"}
+    mock_post.assert_awaited_once()
+    assert "ambiguous" in mock_post.await_args.kwargs["body"]
+    # No fix Run minted ...
+    run = await fake_audit_db.scalar(
+        select(Run).where(Run.repo_id == repo.id)
+    )
+    assert run is None
+    # ... and no manual audit dispatched.
+    job = await fake_audit_db.scalar(
+        select(AuditJob).where(AuditJob.repo_id == repo.id)
+    )
+    assert job is None

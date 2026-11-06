@@ -116,7 +116,9 @@ from app.services import audit_pipeline, feature_enforcement
 from app.services.followup_commands import (
     FEEDBACK_CONCLUSION,
     TEST_FIX_CONCLUSION,
+    _strip_fenced_code,
     has_issue_trigger,
+    is_auditor_fix_trigger,
     parse_followup_command,
 )
 from app.services.repo_settings import get_repo_settings
@@ -2133,6 +2135,75 @@ async def _post_issue_trigger_ack(
         )
 
 
+#: Lightweight replies for auditor mentions on issues (feat-251, v1). No
+#: LLM, no thread fetch, no Run -- a single best-effort comment. The Q&A
+#: route still owns PR comments; these bodies are issue-only.
+_AUDITOR_HELP_COMMENT_BODY = (
+    "I can help with this issue, or run an audit with "
+    "'@haunter-auditor audit'. To trigger a fix PR, comment exactly "
+    "'@haunter-auditor fix this issue'."
+)
+
+#: Posted when a comment carries both the exact fix phrase and an audit
+#: request: firing both a fix pipeline and a read-only audit from one
+#: comment would be ambiguous, so neither runs.
+_AUDITOR_AMBIGUOUS_COMMENT_BODY = (
+    "That request looks ambiguous -- it asks me to both fix this issue "
+    "and run an audit. Please send one at a time: comment exactly "
+    "'@haunter-auditor fix this issue' to trigger a fix PR, or "
+    "'@haunter-auditor audit ...' to run a read-only audit."
+)
+
+
+async def _post_auditor_helpful_comment(
+    repo: Repo,
+    issue_number: int,
+    token: str,
+    kind: str,
+    enable_pr_comments: bool,
+) -> None:
+    """Post the lightweight auditor reply on an issue (best-effort).
+
+    `kind` is `"help"` or `"ambiguous"`. Runs only after the GitHub token
+    is resolved; any post failure is logged and swallowed so the delivery
+    itself still stands, mirroring `_post_issue_trigger_ack`. Unknown
+    `kind` values fall back to the generic help body. Like every other bot
+    comment path, suppressed outright when the repo disables
+    `enable_pr_comments`.
+    """
+    if not enable_pr_comments:
+        logger.info(
+            "Auditor helpful comment suppressed for %s/%s#%d: pr_comments disabled",
+            repo.owner,
+            repo.name,
+            issue_number,
+        )
+        return
+    from app import github_client
+
+    body = (
+        _AUDITOR_AMBIGUOUS_COMMENT_BODY if kind == "ambiguous"
+        else _AUDITOR_HELP_COMMENT_BODY
+    )
+    try:
+        await github_client.create_issue_comment(
+            owner=repo.owner,
+            repo=repo.name,
+            issue_number=issue_number,
+            body=body,
+            token=token,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Auditor helpful comment failed for %s/%s#%d (kind=%s, %s) -- delivery stands",
+            repo.owner,
+            repo.name,
+            issue_number,
+            kind,
+            type(exc).__name__,
+        )
+
+
 async def _handle_issue_trigger(
     db: AsyncSession,
     background_tasks: BackgroundTasks,
@@ -2177,18 +2248,12 @@ async def _handle_issue_trigger(
         )
         return {"status": "ignored", "reason": "no issue trigger"}
 
-    # 2. Auditor exclusivity (R5): auditor mentions belong to the read-only
-    # auditor, which cannot act on issues (no PR endpoints) — they must never
-    # mint a fix Run. Checked before any fix routing.
-    if has_auditor_mention(trigger_text) or audit_pipeline.is_manual_audit_comment(
-        trigger_text
-    ):
-        logger.info(
-            "Ignored %s (delivery_id=%s): auditor mention, not a fix request",
-            event,
-            delivery_id,
-        )
-        return {"status": "ignored", "reason": "auditor mention, not a fix request"}
+    # 2. Auditor routing lives post-guard (after token + kill-switch/cost
+    # gate, below): gate 1 is lexical-only, so auditor mentions still enter
+    # this function, and the three-way branch there decides -- mixed fix
+    # phrase + audit request -> ambiguous comment, pure fix phrase -> the
+    # existing minting path, manual audit -> existing outcome, plain mention
+    # -> lightweight helpful comment.
 
     # 3. Collaborator Authority: same allowlist as the PR-comment flow.
     if (author_association or "").upper() not in ALLOWED_AUTHOR_ASSOCIATIONS:
@@ -2334,6 +2399,51 @@ async def _handle_issue_trigger(
             type(exc).__name__,
         )
         return {"status": "skipped", "reason": "github token unavailable"}
+
+    # 7b. Auditor branch (feat-251): runs only after every guard above has
+    # passed, so unauthorized/bot authors and disabled repos never reach it
+    # (no comment, no Run). Gate 1 is lexical-only -- it fires on
+    # `@haunter-auditor` -- so auditor comments arrive here. Mention
+    # detection stays case-insensitive but runs on the fence-stripped text,
+    # like the fix phrase (case-sensitive) and the audit check, so a fenced
+    # auditor token can neither fire the pipeline nor suppress a real
+    # `@haunter` fix outside the fence. Precedence: mixed
+    # -> ambiguous comment; pure fix phrase -> fall through to minting;
+    # manual audit -> existing outcome (ignored, no comment); plain mention
+    # -> helpful comment; otherwise the legacy `@haunter`/`/fix` path below
+    # is unchanged.
+    stripped_trigger = _strip_fenced_code(
+        trigger_text if isinstance(trigger_text, str) else ""
+    )
+    auditor_mention = has_auditor_mention(stripped_trigger)
+    manual_audit = audit_pipeline.is_manual_audit_comment(stripped_trigger)
+    fix_phrase = is_auditor_fix_trigger(stripped_trigger)
+    if auditor_mention or manual_audit or fix_phrase:
+        # 1. Mixed: the exact fix phrase plus an audit request. Firing
+        # both the fix pipeline and a read-only audit from one comment
+        # would be ambiguous, so neither runs.
+        if fix_phrase and manual_audit:
+            await _post_auditor_helpful_comment(
+                repo, issue_number, token, "ambiguous", enable_issue_ack
+            )
+            return {"status": "ignored", "reason": "ambiguous auditor request"}
+        # 2. Pure fix phrase: fall through to the minting path below.
+        if not fix_phrase:
+            # 3. Manual audit keeps its existing outcome (ignored, no comment).
+            if manual_audit:
+                return {
+                    "status": "ignored",
+                    "reason": "auditor mention, not a fix request",
+                }
+            # 4. Plain mention: lightweight helpful comment, no Run.
+            await _post_auditor_helpful_comment(
+                repo, issue_number, token, "help", enable_issue_ack
+            )
+            return {
+                "status": "ignored",
+                "reason": "auditor mention, not a fix request",
+            }
+
     base_branch = repo.default_branch or "main"
     try:
         head_sha = await github_client.fetch_branch_sha(

@@ -72,7 +72,12 @@ logger = logging.getLogger(__name__)
 AUDIT_MAX_DIFF_CHARS = MAX_DIFF_CHARS
 PERSPECTIVE_TIMEOUT_S = 75.0
 PERSPECTIVE_DEADLINE_S = 100.0
-PERSPECTIVE_CONCURRENCY_LIMIT = 5
+#: Max concurrent LLM perspective fan-out per audit, holistic included (#257).
+PERSPECTIVE_CONCURRENCY_LIMIT = 4
+#: Throttle for concurrent source-file fetches backing AST grounding. This is
+#: a fetch throttle, not perspective fan-out: it stays independent so the
+#: perspective cap above never throttles unrelated file fetching (#257).
+AUDIT_SOURCE_FETCH_CONCURRENCY_LIMIT = 5
 AUDIT_FETCH_TIMEOUT_S = 35.0
 # Budget for resolving the shared model config BEFORE any perspective starts.
 # The per-perspective ``PERSPECTIVE_DEADLINE_S`` wraps ``_run_single_perspective``
@@ -2233,7 +2238,7 @@ async def fetch_audit_source_contexts(
     )[:MAX_AST_SOURCE_FILES]
     if not paths:
         return {}
-    semaphore = asyncio.Semaphore(PERSPECTIVE_CONCURRENCY_LIMIT)
+    semaphore = asyncio.Semaphore(AUDIT_SOURCE_FETCH_CONCURRENCY_LIMIT)
     from app import github_client as github
 
     async def fetch_one(path: str) -> tuple[str, Optional[str]]:
@@ -2849,6 +2854,16 @@ async def run_audit(
     should_run_holistic = enable_holistic or (
         perspectives is not None and "holistic" in perspectives
     )
+
+    # Subagent fan-out cap (#257): at most PERSPECTIVE_CONCURRENCY_LIMIT
+    # concurrent LLM passes per audit, with the holistic pass counting inside
+    # the cap. Arbitrary caller-supplied counts (e.g. duplicates) are accepted
+    # but enforced here; the default four-perspective path without holistic
+    # still executes all four.
+    if should_run_holistic:
+        active_perspectives = active_perspectives[: PERSPECTIVE_CONCURRENCY_LIMIT - 1]
+    else:
+        active_perspectives = active_perspectives[:PERSPECTIVE_CONCURRENCY_LIMIT]
 
     tasks = [run_one(perspective) for perspective in active_perspectives]
     if should_run_holistic:

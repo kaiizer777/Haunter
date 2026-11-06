@@ -71,6 +71,30 @@ ORCHESTRATOR_TIMEOUT_S: float = 800.0
 # typical pytest failure line.
 _FAILURE_REASON_TAIL_CHARS: int = 200
 
+# Max concurrent orchestrator pipelines (feat-251, issue #256). Webhook
+# deliveries fan out without a bound, so the heavy body (LLM + sandbox +
+# GitHub writes) is gated on this semaphore instead of letting every
+# delivery run fully in parallel.
+ORCHESTRATOR_MAX_CONCURRENT_PIPELINES: int = 4
+
+
+def _clamp_concurrent_pipelines(value: object) -> int:
+    """Clamp a pipeline-concurrency bound to a usable permit count.
+
+    Non-numeric input falls back to the default; anything below 1
+    clamps to 1 so the semaphore always admits at least one pipeline.
+    """
+    try:
+        permits = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ORCHESTRATOR_MAX_CONCURRENT_PIPELINES
+    return max(1, permits)
+
+
+_PIPELINE_SEMAPHORE: asyncio.Semaphore = asyncio.Semaphore(
+    _clamp_concurrent_pipelines(ORCHESTRATOR_MAX_CONCURRENT_PIPELINES)
+)
+
 # Run statuses considered terminal — no transition allowed out of these.
 # Defined as raw strings (not RunStatus enum members) so the constant
 # block at the top of the file doesn't depend on the class definition below.
@@ -1944,14 +1968,27 @@ async def handle_failed_run(run_id: uuid.UUID) -> None:
             # except below). Without this, the previous outer-session
             # BLOCKER-1 fix would still leave a long-running loop able to
             # burn the full Lambda budget.
+            # The semaphore bounds concurrent heavy pipelines: at most
+            # ORCHESTRATOR_MAX_CONCURRENT_PIPELINES bodies run at once.
+            # The permit wait sits INSIDE the wall-clock timeout, so a
+            # pipeline queued behind a full semaphore still counts against
+            # the 800s budget instead of idling past the Lambda limit
+            # without ever reaching the timeout handler below. The cap is
+            # per-process: separate Lambda environments do not share this
+            # semaphore, so fleet-wide admission stays a deployment
+            # concern (reserved concurrency), not this in-process bound.
+            async def _admitted_pipeline_body() -> None:
+                async with _PIPELINE_SEMAPHORE:
+                    await _orchestrator_pipeline_body(
+                        db=db,
+                        run_id=run_id,
+                        run=run,
+                        repo=repo,
+                        state=state,
+                    )
+
             await asyncio.wait_for(
-                _orchestrator_pipeline_body(
-                    db=db,
-                    run_id=run_id,
-                    run=run,
-                    repo=repo,
-                    state=state,
-                ),
+                _admitted_pipeline_body(),
                 timeout=ORCHESTRATOR_TIMEOUT_S,
             )
 

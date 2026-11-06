@@ -6831,3 +6831,52 @@ async def test_long_supplied_parser_context_avoids_false_degraded():
 
     assert result.analysis_degraded is False
     assert result.publish_allowed is True
+
+
+@pytest.mark.asyncio
+async def test_run_audit_caps_total_perspective_fan_out_at_four():
+    """Issue #257: arbitrary perspective counts plus holistic stay in the cap.
+
+    Six requested perspectives with the holistic pass enabled must execute at
+    most four LLM passes total -- the holistic pass counts inside the cap.
+    """
+    seen: list[str] = []
+
+    async def _complete(*, messages=None, **kwargs):
+        user_text = " ".join(m.get("content", "") for m in (messages or []))
+        perspective = next(
+            (
+                p
+                for p in (
+                    "security",
+                    "correctness",
+                    "performance",
+                    "architecture",
+                    "holistic",
+                )
+                if f"## Perspective\n{p}" in user_text
+            ),
+            "unknown",
+        )
+        seen.append(perspective)
+        return _llm_response(_perspective_payload(f"{perspective} verdict.", 90, []))
+
+    result = await run_audit(
+        diff_text=SAMPLE_DIFF,
+        audit_id="audit-257000000001",
+        llm_client=_mock_llm_client(AsyncMock(side_effect=_complete)),
+        file_contexts=_SAMPLE_FILE_CONTEXTS,
+        perspectives=[
+            "security",
+            "correctness",
+            "performance",
+            "architecture",
+            "security",
+            "correctness",
+        ],
+        enable_holistic=True,
+    )
+
+    assert len(result.perspectives) == 4
+    assert len(seen) == 4
+    assert set(seen) == {"security", "correctness", "performance", "holistic"}

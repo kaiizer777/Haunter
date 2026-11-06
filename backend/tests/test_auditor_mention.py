@@ -28,7 +28,7 @@ import httpx
 import pytest
 
 from app.config import settings
-from app.models import Repo, RepoSettings
+from app.models import Repo, RepoSettings, Run
 from app.webhooks import (
     AUDITOR_QA_SYSTEM_PROMPT,
     _bound_auditor_text,
@@ -102,6 +102,29 @@ def test_non_auditor_mention_ignored(body: str) -> None:
 
 @pytest.mark.parametrize("body", [None, 1234, ["@haunter-auditor"], {"b": 1}])
 def test_auditor_mention_non_string_is_no_op(body: Any) -> None:
+    assert has_auditor_mention(body) is False
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "is this safe @haunter-auditor",
+        "hey @haunter-auditor.",
+        "line one\n@haunter-auditor\nline three",
+    ],
+)
+def test_auditor_mention_placement_triggers(body: str) -> None:
+    assert has_auditor_mention(body) is True
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "@haunter-auditor-bot please check",
+        "@haunter-auditor_audit this",
+    ],
+)
+def test_auditor_mention_placement_boundary_ignored(body: str) -> None:
     assert has_auditor_mention(body) is False
 
 
@@ -1492,3 +1515,41 @@ async def test_stale_queued_row_does_not_shadow_fresh_error(
     assert resp.status_code == 200
     assert resp.json()["status"] == "auditor_queued"
     bg_mock.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_pr_comment_exact_fix_phrase_stays_on_qa_path_without_fix_run(
+    client: httpx.AsyncClient,
+    fake_audit_db: FakeAsyncSession,
+    fake_audit_user_factory,
+    audit_store: FakeStore,
+) -> None:
+    """v1: the exact fix phrase on a PR comment is not a fix trigger.
+
+    PR comments stay on the Q&A route (`auditor_queued` + background worker);
+    no fix Run is minted — the fix phrase is issue-only in v1.
+    """
+    await _seed_router_repo(fake_audit_db, fake_audit_user_factory)
+    payload = _issue_comment_payload(body="@haunter-auditor fix this issue")
+    patches = _no_auditor_side_effects()
+    with patches[0] as llm_cls, patches[1] as post_mock, patches[2] as thread_mock, patches[
+        3
+    ] as pr_mock, patches[4] as issue_mock, patches[5] as review_mock, patches[
+        6
+    ] as diff_mock:
+        with patch(
+            "app.webhooks._run_auditor_mention_background", new_callable=AsyncMock
+        ) as bg_mock:
+            resp = await _post_router(client, "issue_comment", payload)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "auditor_queued"
+    bg_mock.assert_awaited_once()
+    # Nothing heavy ran in the request path: no LLM, no post, no fix Run.
+    llm_cls.assert_not_called()
+    post_mock.assert_not_called()
+    thread_mock.assert_not_called()
+    pr_mock.assert_not_called()
+    issue_mock.assert_not_called()
+    review_mock.assert_not_called()
+    diff_mock.assert_not_called()
+    assert list(audit_store.rows(Run.__table__)) == []

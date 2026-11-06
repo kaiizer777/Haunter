@@ -227,3 +227,33 @@ def parse_followup_command(body: Union[str, None]) -> Optional[FollowupCommand]:
     # itself is the request. This is the pre-router behaviour and is what
     # keeps free-form asks like "@haunter please fix the None input" working.
     return FollowupCommand(command="fix", test_only=False)
+
+
+#: Strict auditor fix-trigger phrase. Case-sensitive literal: only this exact
+#: phrase fires, so ``@haunter-auditor[bot] ...``, any case variation, or
+#: any extra letter never matches. A trailing-letter lookahead keeps
+#: ``... fix this issues`` / ``... issuex`` quiet while trailing prose and
+#: punctuation still fire.
+_AUDITOR_FIX_PHRASE = "@haunter-auditor fix this issue"
+_AUDITOR_FIX_TRIGGER_RE: re.Pattern[str] = re.compile(
+    r"@haunter-auditor fix this issue(?![A-Za-z])"
+)
+
+
+def is_auditor_fix_trigger(body: Union[str, None]) -> bool:
+    """True when the body asks the auditor to fix the issue.
+
+    Fires on the exact, case-sensitive phrase ``@haunter-auditor fix this
+    issue`` outside fenced code blocks; trailing prose and punctuation are
+    tolerated but a directly attached trailing letter is not. Pure and
+    total: never raises, False for non-string input.
+    """
+    if not isinstance(body, str) or not body:
+        return False
+    text = _strip_fenced_code(body)
+    return _AUDITOR_FIX_TRIGGER_RE.search(text) is not None
+
+
+#: Alias covering both predicate names used in the issue, mirroring the
+#: ``has_issue_trigger`` / ``is_manual_audit`` conventions.
+has_auditor_fix_trigger = is_auditor_fix_trigger

@@ -45,7 +45,7 @@ Haunter operates strictly as an autonomous contributor, never an autonomous admi
 ## 2. End-to-End Workflow & Execution Topology
 
 ### 2.1 Webhook Ingestion & Asynchronous Dispatch
-GitHub enforces a strict 10-second acknowledgment window on webhook deliveries. Because a full diagnosis-fix-verification loop requires between 60 and 300 seconds, synchronous execution inside the webhook request handler is impossible.
+GitHub enforces a strict 10-second acknowledgment window on webhook deliveries. Because a full diagnosis-fix-verification loop takes well over 10 seconds (a single verification poll alone runs up to `github_sandbox_poll_timeout_seconds`, with up to three attempts per run), synchronous execution inside the webhook request handler is impossible.
 
 ```mermaid
 sequenceDiagram
@@ -77,7 +77,7 @@ sequenceDiagram
         
         L_ASYNC->>DB: Transition Run -> "verification"
         L_ASYNC->>SB: Git Data API: push patch to haunter-attempt-{N}
-        L_ASYNC->>SB: Poll check-runs / workflow runs (10s intervals, max 120s)
+        L_ASYNC->>SB: Poll check-runs / workflow runs (10s intervals, max 600s)
         SB-->>L_ASYNC: Verification outcome (PASS / FAIL + sanitized error)
         
         alt Verification Passed
@@ -311,7 +311,7 @@ Haunter employs a dedicated, serverless sandbox verification engine based entire
                   │  Unidirectional Polling Loop │
                   │  • Check Runs API (every 10s)│
                   │  • Sanitized Failure Extract │
-                  │  • Max Duration: 120s        │
+                  │  • Max Duration: 600s        │
                   └──────────────────────────────┘
 ```
 
@@ -365,9 +365,10 @@ The mirror inspects file extensions to detect repository runtime:
 2. Parses unified diff patch into individual file modifications. Enforces patch limits: $\le 20$ files, $\le 200 \text{ KB}$ total diff size.
 3. Commits modified files atomically to `haunter-attempt-{attempt_number}` using Git Data API (blob -> tree -> commit -> ref update).
 4. Pushing to `haunter-attempt-{attempt_number}` triggers the GitHub Actions workflow via `on: push: branches: ['haunter-attempt-*']`.
+> Note: `haunter-attempt-*` branches live only on the isolated sandbox mirror for verification. Verified fixes reach the user repository on a separate `haunter/fix-{run_id_hex8}-{attempt}` branch when the PR is opened (§4.4).
 
 ### 5.6 Unidirectional Polling & Failure Sanitization
-- **Polling Loop:** Polls `GET /repos/{owner}/{repo}/actions/runs?head_sha={commit_sha}` every 10 seconds up to `github_sandbox_poll_timeout_seconds` (120 seconds).
+- **Polling Loop:** Polls `GET /repos/{owner}/{repo}/actions/runs?head_sha={commit_sha}` every 10 seconds up to `github_sandbox_poll_timeout_seconds` (600 seconds app default; the Terraform deployment in `infra/aws/variables.tf` still defaults this variable to 120 seconds, so deployed environments use 120 seconds unless overridden).
 - **Log Extraction:** On failure, retrieves job step logs via GitHub Actions Logs API.
 - **Sanitization (`_sanitize_failure_reason`):** Strips environment variables, access tokens, credentials, and truncates logs.
 - **Fast-Fail Classification:** Classifies errors matching non-retryable patterns (HTTP 403, billing/quota limit, installation revoked). Prefixes failure reason with `[non-retryable]`, signalling orchestrator to abort the retry loop and immediately route to fallback.

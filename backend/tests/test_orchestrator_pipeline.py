@@ -1108,3 +1108,408 @@ def test_sanitize_fallback_comprehensive() -> None:
     out_attempts = _sanitize_fallback("Legit diagnosis", [attempt_with_patch])
     assert "super_secret_raw_diff_marker" not in out_attempts
     assert "--- a/secret_file.py" not in out_attempts
+
+
+# ---------------------------------------------------------------------------
+# 10. Issue-Shaped Pipeline Variants (auditor fix phrase -> issue root run)
+# ---------------------------------------------------------------------------
+
+
+#: Exact auditor fix-trigger phrase (case-sensitive literal) behind the issue
+#: root runs exercised below. Grammar banked in test_followup_commands.py and
+#: test_auditor_mention.py; these tests cover phrase -> Run -> pipeline.
+ISSUE_PIPELINE_PHRASE = "@haunter-auditor fix this issue"
+
+#: Source issue number carried on reply_to_comment_id for the seeded runs.
+ISSUE_PIPELINE_NUMBER = 251
+
+
+async def _create_test_issue_run(
+    db: AsyncSession,
+    repo: Repo,
+    *,
+    status: str = "pending",
+    issue_number: int = ISSUE_PIPELINE_NUMBER,
+    trigger_comment_id: Optional[int] = 9100251,
+    diagnosis_summary: Optional[str] = None,
+) -> Run:
+    """Seed an autonomous issue-triggered root run (feat-125 shape).
+
+    github_run_id NULL + parent NULL + reply_to_comment_id set satisfies
+    is_issue_run() for the whole pipeline, including after the fix PR opens.
+    """
+    run = Run(
+        repo_id=repo.id,
+        github_run_id=None,
+        github_delivery_id=str(uuid.uuid4()),
+        trigger_comment_id=trigger_comment_id,
+        reply_to_comment_id=issue_number,
+        head_sha="fedcba9876543210fedcba9876543210fedcba98",
+        head_branch="main",
+        status=status,
+        conclusion="failure",
+        diagnosis_summary=diagnosis_summary,
+    )
+    db.add(run)
+    await db.commit()
+    return run
+
+
+@pytest.mark.anyio
+async def test_pipeline_issue_golden_phrase_to_pr(db: AsyncSession) -> None:
+    """Auditor fix phrase -> issue root run -> sandbox pass -> PR opened.
+
+    Asserts:
+      - the banked phrase is a live auditor fix trigger (phrase -> Run link)
+      - runs.status == 'pr_opened'
+      - runs.pr_url is set to the GitHub PR URL
+      - runs.pr_number is set
+      - runs.pr_branch starts with 'haunter/fix-'
+      - runs.failure_reason is None
+      - the run still satisfies is_issue_run() after its fix PR opens
+    """
+    from app.orchestrator import is_issue_run
+    from app.services.followup_commands import has_auditor_fix_trigger
+
+    assert has_auditor_fix_trigger(ISSUE_PIPELINE_PHRASE) is True
+
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_issue_run(db, repo)
+    run_id = run.id
+
+    mock_summary = (
+        "Crash on empty config in app/config.py:12. "
+        "Reported in issue #251 with repro steps."
+    )
+
+    async def mock_gather_context(run, repo, db):
+        step = RunStep(
+            run_id=run.id,
+            step_name="context_gatherer",
+            input_tokens=150,
+            output_tokens=45,
+            latency_ms=180,
+            cost_estimate=0.0002,
+        )
+        db.add(step)
+        await db.commit()
+        return mock_summary
+
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
+        attempt = _make_mock_attempt(run.id, 1, strategy_notes="add missing default")
+        db.add(attempt)
+        step = RunStep(
+            run_id=run.id,
+            step_name="fix_generator",
+            input_tokens=220,
+            output_tokens=85,
+            latency_ms=320,
+            cost_estimate=0.0004,
+        )
+        db.add(step)
+        await db.commit()
+        return attempt
+
+    async def mock_generate_pr_text(run, verified_attempt, diagnosis_summary, db):
+        step = RunStep(
+            run_id=run.id,
+            step_name="pr_writer",
+            input_tokens=180,
+            output_tokens=60,
+            latency_ms=210,
+            cost_estimate=0.0003,
+        )
+        db.add(step)
+        await db.commit()
+        return {
+            "title": "fix: default empty config in app/config.py",
+            "body": "Resolves the crash reported in the issue.",
+        }
+
+    with (
+        patch("app.orchestrator.gather_context", side_effect=mock_gather_context),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
+        patch(
+            "app.sandbox.verify",
+            new_callable=AsyncMock,
+            return_value={
+                "status": "pass",
+                "failure_reason": None,
+                "build_duration_ms": 1450,
+            },
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            side_effect=mock_generate_pr_text,
+        ),
+        patch(
+            "app.github.pr.get_installation_token",
+            new_callable=AsyncMock,
+            return_value="[REDACTED]",
+        ),
+        patch(
+            "app.github.pr.create_branch", new_callable=AsyncMock, return_value=None
+        ),
+        patch(
+            "app.github.pr.commit_patch", new_callable=AsyncMock, return_value=None
+        ),
+        patch(
+            "app.github.pr.open_pr",
+            new_callable=AsyncMock,
+            return_value={
+                "html_url": "https://github.com/pipe-org/pipe-repo/pull/142",
+                "number": 142,
+            },
+        ),
+    ):
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+
+    assert db_run.status == "pr_opened"
+    assert db_run.pr_url == "https://github.com/pipe-org/pipe-repo/pull/142"
+    assert db_run.pr_number == 142
+    assert db_run.pr_branch is not None
+    assert db_run.pr_branch.startswith("haunter/fix-")
+    assert db_run.failure_reason is None
+    assert db_run.reply_to_comment_id == ISSUE_PIPELINE_NUMBER
+    assert is_issue_run(db_run) is True
+
+
+@pytest.mark.anyio
+async def test_pipeline_issue_retry_sandbox_fail_then_pass(
+    db: AsyncSession,
+) -> None:
+    """Issue root run: first attempt fails sandbox, second passes; one PR.
+
+    Verifies:
+      - Attempt count == 2
+      - Prior attempt passed to generate_fix on attempt 2
+      - Final status == 'pr_opened' with exactly one PR opened
+      - runs.failure_reason is None
+    """
+    from app.orchestrator import is_issue_run
+
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_issue_run(db, repo)
+    run_id = run.id
+
+    prior_attempts_received: list[Optional[Attempt]] = []
+
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
+        prior_attempts_received.append(prior_attempt)
+        attempt_num = len(prior_attempts_received)
+        attempt = _make_mock_attempt(
+            run.id,
+            attempt_num,
+            strategy_notes=f"issue_strategy_attempt_{attempt_num}",
+        )
+        db.add(attempt)
+        step = RunStep(
+            run_id=run.id,
+            step_name="fix_generator",
+            input_tokens=200,
+            output_tokens=80,
+            latency_ms=250,
+            cost_estimate=0.0003,
+        )
+        db.add(step)
+        await db.commit()
+        return attempt
+
+    sandbox_results = [
+        {
+            "status": "fail",
+            "failure_reason": "AssertionError in app/config.py: expected {} got None",
+            "build_duration_ms": 1200,
+        },
+        {"status": "pass", "failure_reason": None, "build_duration_ms": 1100},
+    ]
+
+    with (
+        patch(
+            "app.orchestrator.gather_context",
+            AsyncMock(return_value="Issue #251 root cause"),
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
+        patch("app.sandbox.verify", AsyncMock(side_effect=sandbox_results)),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(
+                return_value={"title": "Fix empty config", "body": "Fixed on retry"}
+            ),
+        ),
+        patch(
+            "app.github.pr.get_installation_token", AsyncMock(return_value="ghs_tok")
+        ),
+        patch("app.github.pr.create_branch", AsyncMock(return_value=None)),
+        patch("app.github.pr.commit_patch", AsyncMock(return_value=None)),
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/pull/155",
+                    "number": 155,
+                }
+            ),
+        ),
+    ):
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+
+    assert db_run.status == "pr_opened"
+    assert db_run.pr_number == 155
+    assert db_run.pr_branch is not None
+    assert db_run.pr_branch.startswith("haunter/fix-")
+    assert db_run.failure_reason is None
+    assert is_issue_run(db_run) is True
+
+    assert len(prior_attempts_received) == 2
+    assert prior_attempts_received[0] is None
+    assert prior_attempts_received[1] is not None
+    assert prior_attempts_received[1].attempt_number == 1
+    # Issue runs append the derived repro target to strategy_notes (R10).
+    assert prior_attempts_received[1].strategy_notes.startswith(
+        "issue_strategy_attempt_1"
+    )
+    assert "Issue Repro" in prior_attempts_received[1].strategy_notes
+
+    att_res = await db.execute(
+        select(Attempt).where(Attempt.run_id == run_id).order_by(Attempt.attempt_number)
+    )
+    attempts = att_res.scalars().all()
+    assert len(attempts) == 2
+    assert attempts[0].verification_status == "fail"
+    assert attempts[1].verification_status == "pass"
+    assert attempts[1].failure_reason is None
+
+
+@pytest.mark.anyio
+async def test_pipeline_issue_exhausted_posts_issue_fallback(
+    db: AsyncSession,
+) -> None:
+    """Issue root run: all attempts fail -> issue-thread fallback + tracking issue.
+
+    Model defaults apply (no RepoSettings row): enable_pr_comments=True posts
+    the diagnosis into the source issue thread, and file_issue_on_fallback=True
+    files a tracking issue. Verifies:
+      - Status transitions to fallback_commented
+      - create_issue_comment called once on the source issue number
+      - post_commit_comment never called (R10: a commit comment would reach
+        nobody watching the issue)
+      - create_issue called once; run.fallback_issue_url/number persisted
+      - All attempts in DB have verification_status == 'fail'
+    """
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_issue_run(db, repo)
+    run_id = run.id
+
+    attempt_counter = 0
+
+    async def mock_generate_fix(
+        run, diagnosis_summary, prior_attempt, db, review_feedback=None
+    ):
+        nonlocal attempt_counter
+        attempt_counter += 1
+        attempt = _make_mock_attempt(
+            run.id,
+            attempt_counter,
+            strategy_notes=f"issue_exhausted_note_{attempt_counter}",
+        )
+        db.add(attempt)
+        await db.commit()
+        return attempt
+
+    # Distinct failure tails so the fast-fail heuristic does not cut the loop.
+    fail_results = [
+        {
+            "status": "fail",
+            "failure_reason": f"Issue fail reason distinct #{i} "
+            + chr(ord("A") + i) * 200,
+            "build_duration_ms": 500,
+        }
+        for i in range(1, settings.max_attempts + 1)
+    ]
+
+    repo_owner = repo.owner
+    repo_name = repo.name
+
+    with (
+        patch(
+            "app.orchestrator.gather_context",
+            AsyncMock(return_value="Distilled root cause summary"),
+        ),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=mock_generate_fix
+        ),
+        patch("app.sandbox.verify", AsyncMock(side_effect=fail_results)),
+        patch(
+            "app.github.pr.get_installation_token",
+            AsyncMock(return_value="[REDACTED]"),
+        ),
+        patch(
+            "app.github_client.create_issue_comment", new_callable=AsyncMock
+        ) as mock_issue_comment,
+        patch(
+            "app.github_client.post_commit_comment", new_callable=AsyncMock
+        ) as mock_commit_comment,
+        patch(
+            "app.github_client.create_issue",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/pipe-org/pipe-repo/issues/7",
+                    "number": 7,
+                }
+            ),
+        ) as mock_create_issue,
+    ):
+        await handle_failed_run(run_id)
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+
+    assert db_run.status == "fallback_commented"
+
+    mock_issue_comment.assert_called_once()
+    issue_kwargs = mock_issue_comment.call_args.kwargs
+    assert issue_kwargs["owner"] == repo_owner
+    assert issue_kwargs["repo"] == repo_name
+    assert issue_kwargs["issue_number"] == ISSUE_PIPELINE_NUMBER
+    assert "Haunter could not verify" in issue_kwargs["body"]
+    assert f"#{ISSUE_PIPELINE_NUMBER}" in issue_kwargs["body"]
+    assert "Distilled root cause summary" in issue_kwargs["body"]
+
+    mock_commit_comment.assert_not_called()
+
+    mock_create_issue.assert_called_once()
+    assert (
+        db_run.fallback_issue_url
+        == "https://github.com/pipe-org/pipe-repo/issues/7"
+    )
+    assert db_run.fallback_issue_number == 7
+
+    att_res = await db.execute(select(Attempt).where(Attempt.run_id == run_id))
+    attempts = att_res.scalars().all()
+    assert len(attempts) == settings.max_attempts
+    for att in attempts:
+        assert att.verification_status == "fail"
