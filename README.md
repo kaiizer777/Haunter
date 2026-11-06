@@ -111,7 +111,7 @@ python scripts/trigger_local_review.py --repo <owner>/<repo> --pr <number> --dry
 
 ## 📊 Full Audit Trail
 
-Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box.
+Every action Haunter takes is logged, timestamped, and surfaced on your local-first dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box, and the data lives in your own database.
 
 An **eval harness** with 20 golden fixtures lets you benchmark and compare quality across any configuration change.
 
@@ -121,6 +121,6 @@ An **eval harness** with 20 golden fixtures lets you benchmark and compare quali
 
 <div align="center">
 
-**Open source — [Apache License 2.0](LICENSE).**
+**Open source — [Apache License 2.0](LICENSE).** Fork it, self-host it, make it yours.
 
 </div>
