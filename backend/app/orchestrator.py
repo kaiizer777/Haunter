@@ -265,6 +265,10 @@ _ALLOWED_TRANSITIONS: dict[RunStatus, set[RunStatus]] = {
     RunStatus.pending_pr: {
         RunStatus.pr_opened,
         RunStatus.completed,
+        # Abort-to-fallback from inside Phase 8 (PR dry-run regen pushed
+        # the run over the cost ceiling): the fix verified but must not be
+        # published, so the fallback comment explains the outcome.
+        RunStatus.fallback,
         RunStatus.error,
     },
     RunStatus.fallback: {RunStatus.fallback_commented, RunStatus.error},
@@ -1640,6 +1644,52 @@ async def _orchestrator_pipeline_body(
                                     f"{mismatch}"
                                 )
                             state["decisions"].append("pr_dry_run_regen_clean")
+                            # The regen above added a generate_fix +
+                            # sandbox_verify cycle whose cost is already in
+                            # running_cost_dollars — re-check the ceiling
+                            # before any branch/commit/PR write.
+                            _regen_total_cents = running_cost_dollars * 100.0
+                            _regen_cost_decision = (
+                                feature_enforcement.check_cost_ceiling(
+                                    _regen_total_cents,
+                                    repo_settings.max_cost_per_run_cents,
+                                )
+                            )
+                            if not _regen_cost_decision.allowed:
+                                logger.warning(
+                                    "orchestrator: run=%s %s after PR dry-run "
+                                    "regen — aborting to fallback",
+                                    run_id,
+                                    _regen_cost_decision.reason,
+                                )
+                                skip_to_fallback_reason = "cost_ceiling_exceeded"
+                                cost_ceiling_failure_reason = (
+                                    _regen_cost_decision.reason
+                                )
+                                state["decisions"].append(
+                                    "cost_ceiling_exceeded"
+                                )
+                                await _persist_failure_reason(
+                                    db=attempt_db,
+                                    run=run,
+                                    reason=_regen_cost_decision.reason,
+                                )
+                                break
+                            # branch + pr_text above describe the superseded
+                            # attempt — recompute both for the regenerated
+                            # attempt so open_pr uses the new title/body and
+                            # the branch embeds the new attempt number.
+                            branch = pr_branch_name(
+                                run=run,
+                                attempt=attempt,
+                                default_branch=repo.default_branch,
+                            )
+                            pr_text = await generate_pr_text(
+                                run=run,
+                                verified_attempt=attempt,
+                                diagnosis_summary=run.diagnosis_summary or "",
+                                db=attempt_db,
+                            )
                         else:
                             state["decisions"].append("pr_dry_run_clean")
                         await create_branch(

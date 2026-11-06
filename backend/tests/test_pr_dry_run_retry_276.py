@@ -39,6 +39,7 @@ from app.github.pr import (
 )
 from app.models import Attempt, Repo, Run, User
 from app.orchestrator import handle_failed_run
+from app.services.feature_enforcement import EnforcementDecision
 from app.subagents.fix_generator import _build_messages
 from tests.conftest import truncate_all
 
@@ -481,3 +482,182 @@ async def test_pipeline_pr_dry_run_second_mismatch_errors_without_mutations(
     assert db_run.failure_reason is not None
     assert "pr_writer" in db_run.failure_reason
     assert "still does not apply" in db_run.failure_reason
+
+
+@pytest.mark.anyio
+async def test_pipeline_regen_uses_refreshed_pr_text_and_branch(
+    db: AsyncSession,
+) -> None:
+    """Mismatch-once then clean: open_pr uses attempt-2 title/body/branch."""
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_run(db, repo, status="pending")
+    run_id = run.id
+
+    bad_patch = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n"
+    good_patch = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+fixed\n"
+    call_log: list[dict[str, Any]] = []
+    generate_mock = _mock_generate_fix_with(
+        [{"number": 1, "patch": bad_patch}, {"number": 2, "patch": good_patch}],
+        call_log,
+    )
+
+    with (
+        patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=generate_mock
+        ),
+        patch(
+            "app.sandbox.verify",
+            AsyncMock(
+                return_value={
+                    "status": "pass",
+                    "failure_reason": None,
+                    "build_duration_ms": 100,
+                }
+            ),
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(
+                side_effect=[
+                    {"title": "fix: attempt one", "body": "body one"},
+                    {"title": "fix: attempt two", "body": "body two"},
+                ]
+            ),
+        ),
+        patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            AsyncMock(
+                side_effect=[
+                    "patch does not apply to app.py: first mismatch",
+                    None,
+                ]
+            ),
+        ),
+        patch(
+            "app.github.pr.create_branch", AsyncMock(return_value=None)
+        ) as mock_create_branch,
+        patch(
+            "app.github.pr.commit_patch", AsyncMock(return_value=None)
+        ) as mock_commit_patch,
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/dryrun-org/dryrun-repo/pull/7",
+                    "number": 7,
+                }
+            ),
+        ) as mock_open_pr,
+    ):
+        await handle_failed_run(run_id)
+
+    assert mock_open_pr.call_count == 1
+    assert mock_open_pr.call_args[1]["title"] == "fix: attempt two"
+    assert mock_open_pr.call_args[1]["body"] == "body two"
+    assert mock_open_pr.call_args[1]["head_branch"].endswith("-2")
+    assert mock_create_branch.call_args[1]["branch"].endswith("-2")
+    assert mock_commit_patch.call_args[1]["commit_msg"] == "fix: attempt two"
+
+
+@pytest.mark.anyio
+async def test_pipeline_regen_cost_over_ceiling_skips_github_writes(
+    db: AsyncSession,
+) -> None:
+    """Regen pushing cost over the ceiling: no branch/commit/PR, fallback."""
+    await truncate_all(db)
+    user = await _create_test_user(db)
+    repo = await _create_test_repo(db, user)
+    run = await _create_test_run(db, repo, status="pending")
+    run_id = run.id
+
+    bad_patch = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n"
+    good_patch = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+fixed\n"
+    call_log: list[dict[str, Any]] = []
+    generate_mock = _mock_generate_fix_with(
+        [{"number": 1, "patch": bad_patch}, {"number": 2, "patch": good_patch}],
+        call_log,
+    )
+    allow = EnforcementDecision(
+        allowed=True, reason="within budget", feature="cost_budget"
+    )
+    deny = EnforcementDecision(
+        allowed=False,
+        reason="Run cost 999.00 exceeds maximum cost limit of 100",
+        feature="cost_budget",
+    )
+
+    with (
+        patch("app.orchestrator.gather_context", AsyncMock(return_value="Diagnosis")),
+        patch(
+            "app.subagents.fix_generator.generate_fix", side_effect=generate_mock
+        ),
+        patch(
+            "app.services.feature_enforcement.check_cost_ceiling",
+            side_effect=[allow, deny],
+        ),
+        patch(
+            "app.sandbox.verify",
+            AsyncMock(
+                return_value={
+                    "status": "pass",
+                    "failure_reason": None,
+                    "build_duration_ms": 100,
+                }
+            ),
+        ),
+        patch(
+            "app.subagents.pr_writer.generate_pr_text",
+            AsyncMock(return_value={"title": "fix: cost", "body": "body"}),
+        ),
+        patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            AsyncMock(
+                side_effect=[
+                    "patch does not apply to app.py: first mismatch",
+                    None,
+                ]
+            ),
+        ),
+        patch(
+            "app.github.pr.create_branch", AsyncMock(return_value=None)
+        ) as mock_create_branch,
+        patch(
+            "app.github.pr.commit_patch", AsyncMock(return_value=None)
+        ) as mock_commit_patch,
+        patch(
+            "app.github.pr.open_pr",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/dryrun-org/dryrun-repo/pull/7",
+                    "number": 7,
+                }
+            ),
+        ) as mock_open_pr,
+        patch("app.github_client.post_commit_comment", new_callable=AsyncMock),
+        patch(
+            "app.github_client.create_issue",
+            AsyncMock(
+                return_value={
+                    "html_url": "https://github.com/dryrun-org/dryrun-repo/issues/1",
+                    "number": 1,
+                }
+            ),
+        ),
+    ):
+        await handle_failed_run(run_id)
+
+    mock_create_branch.assert_not_called()
+    mock_commit_patch.assert_not_called()
+    mock_open_pr.assert_not_called()
+
+    db.expire_all()
+    refreshed = await db.execute(select(Run).where(Run.id == run_id))
+    db_run = refreshed.scalar_one()
+    assert db_run.status == "fallback_commented"
+    assert db_run.failure_reason is not None
+    assert "exceeds" in db_run.failure_reason
