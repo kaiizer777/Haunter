@@ -1454,6 +1454,103 @@ async def test_integrity_error_duplicate_issue_trigger_survives_failing_health_l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,pr_number,pr_url,expected",
+    [
+        ("error", None, None, "queued"),
+        ("fallback_commented", None, None, "queued"),
+        ("flaky_detected", None, None, "queued"),
+        ("completed", None, None, "queued"),
+        ("pending", None, None, "duplicate"),
+        ("fix_generation", None, None, "duplicate"),
+        ("error", 5, None, "duplicate"),
+        ("error", None, "https://example/pr/9", "duplicate"),
+        ("pr_opened", 9, "https://example/pr/9", "duplicate"),
+    ],
+)
+async def test_terminal_run_without_pr_releases_issue_for_retry(
+    status: str,
+    pr_number: object,
+    pr_url: object,
+    expected: str,
+):
+    """Issue #275: only an active run or a run with a PR holds the issue.
+
+    A prior root run in a terminal status (error/fallback_commented/
+    flaky_detected/completed/pr_opened) with pr_number AND pr_url unset
+    releases the issue, so the retry trigger falls through to minting
+    ("queued"). Active statuses, or any terminal run that raised a PR,
+    stay "duplicate".
+    """
+    from types import SimpleNamespace
+
+    existing_id = uuid.uuid4()
+    existing = SimpleNamespace(
+        id=existing_id, status=status, pr_url=pr_url, pr_number=pr_number
+    )
+    repo = SimpleNamespace(id=uuid.uuid4(), default_branch="main")
+    db = MagicMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+
+    mock_audit, mock_enforcement = _issue_trigger_gate_mocks()
+    adapter = MagicMock()
+    adapter.schedule_pipeline = AsyncMock()
+    with (
+        patch("app.webhooks.has_issue_trigger", return_value=True),
+        patch("app.webhooks.has_auditor_mention", return_value=False),
+        patch("app.webhooks.audit_pipeline", mock_audit),
+        patch(
+            "app.webhooks._resolve_repo_for_delivery", new_callable=AsyncMock
+        ) as mock_resolve,
+        patch("app.webhooks.get_repo_settings", new_callable=AsyncMock) as mock_settings,
+        patch("app.webhooks.feature_enforcement", mock_enforcement),
+        patch(
+            "app.webhooks._find_existing_issue_root_run", new_callable=AsyncMock
+        ) as mock_find,
+        patch("app.webhooks._post_issue_trigger_ack", new_callable=AsyncMock),
+        patch("app.webhooks._record_webhook_delivery", new_callable=AsyncMock),
+        patch(
+            "app.github.pr.get_installation_token", new_callable=AsyncMock
+        ) as mock_token,
+        patch(
+            "app.github_client.fetch_branch_sha", new_callable=AsyncMock
+        ) as mock_sha,
+        patch(
+            "app.adapters.hosting.get_hosting_adapter", new_callable=AsyncMock
+        ) as mock_adapter,
+    ):
+        mock_resolve.return_value = (repo, None)
+        mock_settings.return_value = SimpleNamespace(
+            enable_pr_comments=True, enable_auto_fix=True, max_cost_per_run_cents=10000
+        )
+        mock_find.return_value = existing
+        mock_token.return_value = "tok"
+        mock_sha.return_value = "0" * 40
+        mock_adapter.return_value = adapter
+        result = await _handle_issue_trigger(
+            db,
+            MagicMock(),
+            event="issues",
+            delivery_id=f"del-retry-275-{status}-{expected}",
+            repo_owner="acme",
+            repo_name="app",
+            issue_number=9,
+            trigger_text="@haunter fix",
+            trigger_comment_id=101,
+            author_association="MEMBER",
+            author_login="alice",
+            sender={},
+            raw_body=b"{}",
+            replay_repo_id=None,
+        )
+
+    assert result["status"] == expected
+    if expected == "duplicate":
+        assert result["run_id"] == str(existing_id)
+
+
+@pytest.mark.asyncio
 async def test_auditor_background_worker_survives_failing_health_log_insert():
     """Pre-rollback snapshot (d79a7ae): the auditor worker uses copied columns.
 

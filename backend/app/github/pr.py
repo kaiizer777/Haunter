@@ -28,6 +28,7 @@ import logging
 import re
 import time
 from typing import Any, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -1094,9 +1095,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
 
     hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
     lines = file_patch.splitlines()
-    has_no_newline_marker = any(
-        ln == _NO_NEWLINE_MARKER or ln.startswith("\\") for ln in lines
-    )
+    # Tracks whether a "\ No newline at end of file" marker actually
+    # stripped a newline: only then must the tail gate below not re-append
+    # one. (Each marker is resolved per-marker at its hunk end instead.)
+    stripped_trailing_newline = False
     # Skip file header lines (---/+++) until first @@
     hunk_start = None
     for i, ln in enumerate(lines):
@@ -1180,8 +1182,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         last = new_lines[-1]
                         if last.endswith("\r\n"):
                             new_lines[-1] = last[:-2]
+                            stripped_trailing_newline = True
                         elif last.endswith("\n"):
                             new_lines[-1] = last[:-1]
+                            stripped_trailing_newline = True
                     prev_kind = None
                     i += 1
                     continue
@@ -1248,10 +1252,288 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     if (
         result
         and not result.endswith(("\r\n", "\n"))
-        and (had_trailing_newline or not has_no_newline_marker)
+        and had_trailing_newline
+        and not stripped_trailing_newline
     ):
         result += nl
     return result
+
+
+_MISMATCH_LINE_LIMIT = 200
+
+
+def _clip_mismatch_line(line: str) -> str:
+    """Clip a line quoted in a mismatch report so LLM feedback stays bounded."""
+    if len(line) <= _MISMATCH_LINE_LIMIT:
+        return line
+    return line[:_MISMATCH_LINE_LIMIT] + "..."
+
+
+def _describe_apply_mismatch(
+    original_text: str, file_patch: str, file_path: str
+) -> str:
+    """
+    Best-effort locator for a patch the fail-closed applier rejected.
+
+    Reporting-only: the apply DECISION always comes from
+    _apply_unified_diff_to_content. This replays each hunk in isolation
+    against the original text to find the first hunk that does not apply,
+    then reports its first diverging context/deletion line as
+    file + hunk header + expected-vs-actual so a regenerating LLM can quote
+    the target exactly. Falls back to a hunk-level message when hunks apply
+    in isolation but not in combination (e.g. overlapping hunks).
+    """
+    hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
+    hunks: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    for raw_line in file_patch.splitlines():
+        if raw_line.startswith("@@"):
+            if current is not None:
+                hunks.append(current)
+            current = (raw_line, [])
+        elif current is not None:
+            current[1].append(raw_line)
+    if current is not None:
+        hunks.append(current)
+
+    orig_lines = original_text.splitlines()
+    for header, body in hunks:
+        single_hunk_patch = header + "\n" + "\n".join(body) + "\n"
+        if (
+            _apply_unified_diff_to_content(original_text, single_hunk_patch)
+            is not None
+        ):
+            continue
+        # First failing hunk -- report its first diverging -/context line.
+        match = hunk_header_re.match(header)
+        idx = max(0, int(match.group(1)) - 1) if match else 0
+        for hunk_line in body:
+            if hunk_line.startswith("+") or hunk_line.startswith("\\"):
+                continue
+            if hunk_line == "":
+                # Mirrors the applier: a blank line is context that always
+                # "applies" (it never fail-closes); consume an original line
+                # only when that line is itself empty.
+                if idx < len(orig_lines) and orig_lines[idx].removesuffix("\r\n").removesuffix("\n") == "":
+                    idx += 1
+                continue
+            if hunk_line[:1] in (" ", "-"):
+                kind = "context" if hunk_line.startswith(" ") else "deletion"
+                expected = hunk_line[1:]
+                if idx >= len(orig_lines):
+                    return (
+                        f"patch does not apply to {file_path}: hunk {header}: "
+                        f"expected {kind} line "
+                        f"{_clip_mismatch_line(expected)!r} but the target "
+                        f"file ends at line {idx}."
+                    )
+                actual = orig_lines[idx]
+                if _norm_hunk_line(actual) != _norm_hunk_line(expected):
+                    return (
+                        f"patch does not apply to {file_path}: hunk {header}: "
+                        f"expected {kind} line "
+                        f"{_clip_mismatch_line(expected)!r} but target line "
+                        f"{idx + 1} is {_clip_mismatch_line(actual)!r}."
+                    )
+                idx += 1
+                continue
+            # Unknown prefix -- the applier fail-closes on these.
+            return (
+                f"patch does not apply to {file_path}: hunk {header}: "
+                f"unexpected line prefix in {_clip_mismatch_line(hunk_line)!r}."
+            )
+        return (
+            f"patch does not apply to {file_path}: hunk {header} "
+            f"does not match the target file."
+        )
+    # Every hunk applies in isolation but the combination does not (e.g.
+    # overlapping hunks): no single first divergence to quote.
+    return (
+        f"patch does not apply to {file_path}: hunk context does not match "
+        f"the target file."
+    )
+
+
+async def _fetch_original_and_apply(
+    client: httpx.AsyncClient,
+    *,
+    api: str,
+    headers: dict[str, str],
+    file_path: str,
+    file_patch: str,
+    ref: str,
+) -> tuple[bool, str, str | None] | None:
+    """Fetch, decode, and apply one patch file (shared fetch/decode/apply).
+
+    Used by both dry_run_patch_at_sha (read-only check) and commit_patch
+    (which then creates blobs/tree/commit from the result — writes stay
+    in commit_patch).
+
+    Performs the path guard, deletion detection, Contents fetch at `ref`,
+    base64 decode, and the fail-closed hunk apply. Returns None when the
+    target is 404 and the patch deletes it (already absent — nothing to
+    apply). Otherwise returns (is_deletion, original_text, new_text),
+    where new_text is None when the hunks do not apply (caller reports
+    it: dry-run returns a mismatch string, commit raises).
+
+    Raises:
+        GitHubPRValidationError: invalid file path.
+        GitHubPRError: a GitHub API call failed.
+    """
+    # Shared last line of defence before any apply.
+    if len(file_path) > 255 or not _BRANCH_RE.match(
+        file_path.replace("/", "_")
+    ):
+        if (
+            ".." in file_path
+            or file_path.startswith("/")
+            or "//" in file_path
+        ):
+            raise GitHubPRValidationError(
+                "Refusing to apply remediation diff: invalid file path."
+            )
+
+    # Check for explicit file deletion (same detection in both callers).
+    is_deletion = False
+    patch_lines = file_patch.splitlines()
+    if len(patch_lines) >= 2:
+        second_line = patch_lines[1].strip()
+        if (
+            second_line
+            in (
+                "+++ /dev/null",
+                "+++ b/dev/null",
+                "+++ b//dev/null",
+                "+++ dev/null",
+            )
+            or "/dev/null" in second_line
+        ):
+            is_deletion = True
+
+    try:
+        content_resp = await client.get(
+            f"{api}/contents/{quote(file_path, safe='/')}",
+            headers=headers,
+            params={"ref": ref},
+        )
+    except httpx.RequestError as exc:
+        raise GitHubPRError(
+            "Network error fetching contents for "
+            f"{file_path!r}: {exc.__class__.__name__}"
+        ) from exc
+    if content_resp.status_code == 404:
+        if is_deletion:
+            return None
+        original_text = ""
+    elif content_resp.is_error:
+        raise GitHubPRError(
+            "Cannot fetch file contents for the patch target: "
+            f"HTTP {content_resp.status_code}"
+        )
+    else:
+        try:
+            data = content_resp.json()
+            # Contents API returns base64-encoded content (may be list for dir)
+            if isinstance(data, list):
+                raise GitHubPRError(
+                    "Patch target resolves to a directory, not a file."
+                )
+            b64 = data.get("content", "")
+            # Content may contain newlines; GitHub wraps at 60 chars
+            b64_clean = "".join(b64.split())
+            original_text = (
+                base64.b64decode(b64_clean).decode(
+                    "utf-8", errors="replace"
+                )
+                if b64_clean
+                else ""
+            )
+        except GitHubPRError:
+            raise
+        except Exception as exc:
+            raise GitHubPRError(
+                "Cannot decode the current file contents for the patch target."
+            ) from exc
+
+    new_text = _apply_unified_diff_to_content(original_text, file_patch)
+    return (is_deletion, original_text, new_text)
+
+
+async def dry_run_patch_at_sha(
+    owner: str,
+    repo: str,
+    patch_text: str,
+    base_sha: str,
+    token: str,
+) -> str | None:
+    """
+    Read-only dry-run of commit_patch apply semantics against base_sha.
+
+    Fetches each target file at base_sha via the Contents API (same headers
+    and base64 decode as commit_patch), splits via _parse_patch_files, and
+    runs the fail-closed _apply_unified_diff_to_content per file.
+
+    Returns None when the patch applies cleanly, otherwise a
+    file+hunk+expected-vs-actual mismatch description for LLM-regen feedback.
+    Makes no blob/tree/commit/ref calls and creates no branch.
+
+    Raises:
+        GitHubPRValidationError: patch is structurally unusable (the same
+            cases commit_patch fail-closes on before any per-file apply).
+        GitHubPRError: a GitHub API call failed.
+    """
+    _validate_ident(owner, "owner")
+    _validate_ident(repo, "repo")
+    if not base_sha or not isinstance(base_sha, str):
+        raise GitHubPRValidationError(
+            "Cannot dry-run remediation diff: missing base SHA."
+        )
+
+    try:
+        validate_unified_diff(patch_text)
+    except InvalidUnifiedDiffError as exc:
+        raise GitHubPRValidationError(
+            f"Refusing to apply malformed remediation diff: {exc}"
+        ) from exc
+
+    headers = _build_auth_headers(token)
+    api = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+
+    per_file_patches = _parse_patch_files(patch_text)
+    if not per_file_patches:
+        raise GitHubPRValidationError(
+            "Refusing to apply remediation diff: no applicable file sections."
+        )
+
+    # Files the patch actually applies to. A 404 + deletion skip does
+    # not count: a patch that applies to nothing must not read as clean.
+    applied_or_deleted_count = 0
+
+    async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
+        for file_path, file_patch in per_file_patches.items():
+            fetched = await _fetch_original_and_apply(
+                client,
+                api=api,
+                headers=headers,
+                file_path=file_path,
+                file_patch=file_patch,
+                ref=base_sha,
+            )
+            if fetched is None:
+                # Deletion target already absent — nothing to apply.
+                continue
+            _is_deletion, original_text, new_text = fetched
+            if new_text is None:
+                return _describe_apply_mismatch(
+                    original_text, file_patch, file_path
+                )
+            applied_or_deleted_count += 1
+    if applied_or_deleted_count == 0:
+        return (
+            "patch produces no file changes: every file section skipped "
+            "(deletion of an already-absent target)."
+        )
+    return None
 
 
 async def commit_patch(
@@ -1348,80 +1630,21 @@ async def commit_patch(
             )
 
         for file_path, file_patch in per_file_patches.items():
-            # The shared validator already rejects traversal and absolute
-            # paths; this is the last line of defence before the tree API.
-            if len(file_path) > 255 or not _BRANCH_RE.match(
-                file_path.replace("/", "_")
-            ):
-                if (
-                    ".." in file_path
-                    or file_path.startswith("/")
-                    or "//" in file_path
-                ):
-                    raise GitHubPRValidationError(
-                        "Refusing to apply remediation diff: invalid file path."
-                    )
-
-            # Check for explicit file deletion
-            is_deletion = False
-            patch_lines = file_patch.splitlines()
-            if len(patch_lines) >= 2:
-                second_line = patch_lines[1].strip()
-                if (
-                    second_line in (
-                        "+++ /dev/null",
-                        "+++ b/dev/null",
-                        "+++ b//dev/null",
-                        "+++ dev/null",
-                    )
-                    or "/dev/null" in second_line
-                ):
-                    is_deletion = True
-
-            # Fetch current file content (may be new file → 404)
-            content_resp = await client.get(
-                f"{api}/contents/{file_path}",
+            fetched = await _fetch_original_and_apply(
+                client,
+                api=api,
                 headers=headers,
-                params={"ref": head_sha},
+                file_path=file_path,
+                file_patch=file_patch,
+                ref=head_sha,
             )
-            if content_resp.status_code == 404:
-                if is_deletion:
-                    logger.info(
-                        "github.pr: deletion target already absent — skipping"
-                    )
-                    continue
-                original_text = ""
-            elif content_resp.is_error:
-                raise GitHubPRError(
-                    "Cannot fetch file contents for the patch target: "
-                    f"HTTP {content_resp.status_code}"
+            if fetched is None:
+                logger.info(
+                    "github.pr: deletion target already absent — skipping"
                 )
-            else:
-                try:
-                    data = content_resp.json()
-                    # Contents API returns base64-encoded content (may be list for dir)
-                    if isinstance(data, list):
-                        raise GitHubPRError(
-                            "Patch target resolves to a directory, not a file."
-                        )
-                    b64 = data.get("content", "")
-                    # Content may contain newlines; GitHub wraps at 60 chars
-                    b64_clean = "".join(b64.split())
-                    original_text = (
-                        base64.b64decode(b64_clean).decode(
-                            "utf-8", errors="replace"
-                        )
-                        if b64_clean
-                        else ""
-                    )
-                except GitHubPRError:
-                    raise
-                except Exception as exc:
-                    raise GitHubPRError(
-                        "Cannot decode the current file contents for the patch target."
-                    ) from exc
+                continue
+            is_deletion, original_text, new_text = fetched
 
-            new_text = _apply_unified_diff_to_content(original_text, file_patch)
             if new_text is None:
                 raise GitHubPRValidationError(
                     "Refusing to apply remediation diff: hunk context does not "

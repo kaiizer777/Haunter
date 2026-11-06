@@ -184,6 +184,16 @@ def _validate_patch(patch: str) -> None:
             "Patch contains none of the required diff markers: '@@', 'diff --git', or '---'/'+++'."
         )
 
+    # A redacted diagnosis value must never leak into a '-' or ' '
+    # (context) line: [REDACTED...] is not a byte-exact quote of the
+    # target file, so the patch could not apply. Retriable format
+    # failure — the model regenerates without the marker.
+    for line in stripped.splitlines():
+        if line[:1] in ("-", " ") and "[REDACTED" in line:
+            raise PatchFormatRejected(
+                "Patch contains a redaction marker ('[REDACTED...]') in a "
+                "'-' or context line; quote the target file byte-exactly."
+            )
     # Extract all file paths from hunk headers
     raw_paths = _HUNK_PATH_RE.findall(stripped)
 
@@ -528,6 +538,15 @@ def _build_messages(
         "files unrelated to the failure, (b) pick the right config file to create or "
         "modify (e.g. if pyproject.toml already exists, modify it instead of creating "
         "setup.cfg), (c) match the project's existing style.\n"
+        "\n"
+        "VERBATIM DIFF RULE: every '-' line and every ' ' (context) line MUST be a "
+        "byte-exact quote of the corresponding line in the target file -- copy it "
+        "character-for-character; never paraphrase, reword, or reformat it. Only '+' "
+        "lines may contain new text. A paraphrased '-' or context line will not apply.\n"
+        "Never emit a redaction marker like [REDACTED...] in a '-' or ' ' (context) line: "
+        "redacted text is not a byte-exact quote of the target file, so the patch would not apply. "
+        "If the diagnosis shows redacted values, omit those lines from '-' and ' ' hunks -- "
+        "only '+' lines may introduce new text.\n"
         "\n"
         "If a '## Source Code of Failing Files' section is present, it contains the ACTUAL source "
         "code of the implementation file being tested. Your unified diff MUST modify the exact "
