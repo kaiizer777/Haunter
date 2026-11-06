@@ -11,7 +11,7 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 # AGENTS.md — Haunter Frontend Dashboard
 
 ## Project Description
-The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CSS v4, TypeScript) for monitoring and administering the Haunter autonomous CI failure diagnosis and fix agent. The dashboard provides run history, detailed step-by-step diagnostic traces, eval harness results, active repository controls, and live model switching.
+The Haunter frontend is a Next.js 16 static SPA dashboard (React 19, Tailwind CSS v4, TypeScript) for monitoring and administering the Haunter personal 24/7 GitHub bot (reviews PRs, fixes tagged issues + raises PRs, joins the convo on tag). The dashboard provides run history, detailed step-by-step diagnostic traces, eval harness results, active repository controls, and live model switching.
 
 ## Architecture & Hosting Ground Truth
 - **Frontend Hosting**: **Cloudflare Workers Static Assets** configured via `wrangler.jsonc` (Worker name: `haunter`, static directory: `./out`). It is **NOT** hosted on Cloudflare Pages and **NOT** hosted on Vercel.

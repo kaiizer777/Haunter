@@ -1,6 +1,6 @@
 # Haunter Dashboard Frontend
 
-The web dashboard for [Haunter](file:///C:/Users/bari2/Desktop/Haunter/README.md) — an autonomous CI failure diagnosis and fix agent. The dashboard provides run history, detailed step-by-step diagnostic traces, eval harness results, active repository controls, and live model switching.
+The web dashboard for [Haunter](file:///C:/Users/bari2/Desktop/Haunter/README.md) — your personal 24/7 GitHub bot (reviews PRs, fixes tagged issues + raises PRs, joins the convo on tag). The dashboard provides run history, detailed step-by-step diagnostic traces, eval harness results, active repository controls, and live model switching.
 
 ## Tech Stack
 - **Framework**: [Next.js](https://nextjs.org/) 16 (App Router)
