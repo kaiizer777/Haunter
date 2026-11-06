@@ -1113,6 +1113,23 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     # describes (a '+' addition it terminates, or nothing after '-').
     prev_kind: str | None = None
 
+    # O(n) precompute: for each line index, whether no hunk content line
+    # (' ', '-', '+') follows it before the next '@@' header. Lets each
+    # "\ No newline" marker resolve hunk-end in O(1) instead of scanning
+    # forward per marker (O(markers x lines) on marker-heavy patches).
+    # A line's own kind never counts toward its own lookup: the flag is
+    # assigned before folding the current line in, so marker/blank/unknown
+    # lines leave it unchanged — matching the forward scan exactly.
+    _at_hunk_end: list[bool] = [True] * len(lines)
+    _has_content_after = False
+    for _idx in range(len(lines) - 1, -1, -1):
+        _at_hunk_end[_idx] = not _has_content_after
+        _ln = lines[_idx]
+        if _ln.startswith("@@"):
+            _has_content_after = False
+        elif _ln[:1] in (" ", "-", "+"):
+            _has_content_after = True
+
     i = hunk_start
     while i < len(lines):
         line = lines[i]
@@ -1157,13 +1174,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     # after it in the same hunk is malformed model output and
                     # is ignored, so stripping can never concatenate an added
                     # line with the content that follows the stray marker.
-                    at_hunk_end = True
-                    for nxt in lines[i + 1 :]:
-                        if nxt.startswith("@@"):
-                            break
-                        if nxt[:1] in (" ", "-", "+"):
-                            at_hunk_end = False
-                            break
+                    # O(1) lookup from the precomputed table above.
+                    at_hunk_end = _at_hunk_end[i]
                     if prev_kind == "+" and at_hunk_end and new_lines:
                         last = new_lines[-1]
                         if last.endswith("\r\n"):
