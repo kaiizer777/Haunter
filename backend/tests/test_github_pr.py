@@ -1510,3 +1510,24 @@ def test_apply_unified_diff_no_newline_marker_mid_hunk_ignored() -> None:
         "+c\n"
     )
     assert _apply_unified_diff_to_content(original, file_patch) == "a\nb\nc\n"
+
+
+def test_apply_unified_diff_many_no_newline_markers_linear() -> None:
+    """Many markers in one hunk: only the trailing marker strips (cubic P2).
+
+    Covers the O(1) hunk-end lookup: every non-final marker is mid-hunk
+    (ignored, newlines kept) and only the marker at the true hunk end
+    strips. Deterministic correctness guard — no timing assert.
+    """
+    count = 200
+    body = "".join(
+        f"+L{k}\n\\ No newline at end of file\n" for k in range(count)
+    )
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        f"@@ -1,1 +1,{count} @@\n"
+        "-a\n" + body
+    )
+    expected = "".join(f"L{k}\n" for k in range(count - 1)) + f"L{count - 1}"
+    assert _apply_unified_diff_to_content("a", file_patch) == expected
