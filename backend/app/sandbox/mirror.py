@@ -910,7 +910,13 @@ def _fail_closed_push_gate(patch_text: str, base_files: dict[str, bytes]) -> Non
     always matches its tier-1 exact position, so the silent-drop and
     strip-tier fallbacks are unreachable for gated content. The mirror
     workflow file is not a valid patch target.
+
+    Seedless pushes (no mirrored tree) skip the gate: with no base content
+    there is nothing to check parity against, and the push path below treats
+    targets as new files (#164 seedless-verify contract).
     """
+    if not base_files:
+        return
     from app.github.pr import _apply_unified_diff_to_content
 
     try:
