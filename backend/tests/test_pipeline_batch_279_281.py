@@ -188,6 +188,32 @@ async def test_retry_response_truncation_raises() -> None:
 
 
 @pytest.mark.anyio
+async def test_retry_inferred_truncation_raises() -> None:
+    """Unparseable first response then reason-less full-budget retry is cut."""
+    mock_complete = AsyncMock(
+        side_effect=[
+            {"content": "not json", "usage": {"input_tokens": 1, "output_tokens": 10}},
+            {
+                "content": "not json",
+                "usage": {"input_tokens": 1, "output_tokens": _FIX_MAX_TOKENS},
+            },
+        ]
+    )
+    with (
+        patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
+        pytest.raises(FixOutputTruncatedError),
+    ):
+        await _call_and_parse(
+            messages=[{"role": "system", "content": "sys"}],
+            diagnosis_summary="ImportError in app.py",
+            prior_attempt=None,
+            db=AsyncMock(),
+            run_id=uuid.uuid4(),
+        )
+    assert mock_complete.call_count == 2
+
+
+@pytest.mark.anyio
 async def test_clean_and_unknown_reasons_parse_normally() -> None:
     for response in (
         _llm_response(VALID_PATCH, finish_reason="stop"),
