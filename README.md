@@ -65,6 +65,50 @@ CI fails  →  Root cause traced  →  Fix generated  →  Sandboxed in real CI 
 
 ---
 
+## 🚀 Self-host quickstart
+
+Run the whole thing on your own machine in two terminals. Prerequisites: **Node 20+** and **Python 3.11**.
+
+**1. Clone it.**
+
+```
+git clone https://github.com/kaiizer777/Haunter.git
+cd Haunter
+```
+
+**2. Backend (terminal 1 — port 7555).**
+
+```
+cd backend
+cp .env.example .env   # then fill in your own keys: DATABASE_URL, GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET,
+                       # FRONTEND_URL, OPENCODE_ZEN_API_KEY, GITHUB_WEBHOOK_SECRET, GITHUB_TOKEN
+python -m venv .venv
+.venv\Scripts\activate   # macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --port 7555
+```
+
+**3. Frontend (terminal 2 — port 3011).**
+
+```
+cd frontend
+npm install
+npm run dev   # http://localhost:3011
+```
+
+**4. Point it at your repo.** Add a webhook on your GitHub repository targeting your backend URL (`POST /webhooks/github`, HMAC-signed with your `GITHUB_WEBHOOK_SECRET`). For local smoke tests, skip GitHub and fire the real pipeline directly:
+
+```
+cd backend
+python scripts/trigger_local_review.py --repo <owner>/<repo> --pr <number> --dry-run --secret devsecret
+```
+
+(A `queued` response means accepted — watch the uvicorn log for the pipeline run. `GITHUB_WEBHOOK_SECRET` in `backend/.env` must match the `--secret` value.)
+
+**Deploy yours when ready** — same code, your infra: backend on AWS Lambda, the dashboard SPA on Cloudflare Workers, Postgres on Neon. Your keys, your data, your bot, 24/7.
+
+---
+
 ## 📊 Full Audit Trail
 
 Every action Haunter takes is logged, timestamped, and surfaced on the dashboard — confidence scores, cost, latency, and full per-run agent traces. Nothing is a black box.
