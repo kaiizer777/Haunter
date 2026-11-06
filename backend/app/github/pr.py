@@ -1350,6 +1350,111 @@ def _describe_apply_mismatch(
     )
 
 
+async def _fetch_original_and_apply(
+    client: httpx.AsyncClient,
+    *,
+    api: str,
+    headers: dict[str, str],
+    file_path: str,
+    file_patch: str,
+    ref: str,
+) -> tuple[bool, str, str | None] | None:
+    """Fetch, decode, and apply one patch file (shared fetch/decode/apply).
+
+    Used by both dry_run_patch_at_sha (read-only check) and commit_patch
+    (which then creates blobs/tree/commit from the result — writes stay
+    in commit_patch).
+
+    Performs the path guard, deletion detection, Contents fetch at `ref`,
+    base64 decode, and the fail-closed hunk apply. Returns None when the
+    target is 404 and the patch deletes it (already absent — nothing to
+    apply). Otherwise returns (is_deletion, original_text, new_text),
+    where new_text is None when the hunks do not apply (caller reports
+    it: dry-run returns a mismatch string, commit raises).
+
+    Raises:
+        GitHubPRValidationError: invalid file path.
+        GitHubPRError: a GitHub API call failed.
+    """
+    # Shared last line of defence before any apply.
+    if len(file_path) > 255 or not _BRANCH_RE.match(
+        file_path.replace("/", "_")
+    ):
+        if (
+            ".." in file_path
+            or file_path.startswith("/")
+            or "//" in file_path
+        ):
+            raise GitHubPRValidationError(
+                "Refusing to apply remediation diff: invalid file path."
+            )
+
+    # Check for explicit file deletion (same detection in both callers).
+    is_deletion = False
+    patch_lines = file_patch.splitlines()
+    if len(patch_lines) >= 2:
+        second_line = patch_lines[1].strip()
+        if (
+            second_line
+            in (
+                "+++ /dev/null",
+                "+++ b/dev/null",
+                "+++ b//dev/null",
+                "+++ dev/null",
+            )
+            or "/dev/null" in second_line
+        ):
+            is_deletion = True
+
+    try:
+        content_resp = await client.get(
+            f"{api}/contents/{quote(file_path, safe='/')}",
+            headers=headers,
+            params={"ref": ref},
+        )
+    except httpx.RequestError as exc:
+        raise GitHubPRError(
+            "Network error fetching contents for "
+            f"{file_path!r}: {exc.__class__.__name__}"
+        ) from exc
+    if content_resp.status_code == 404:
+        if is_deletion:
+            return None
+        original_text = ""
+    elif content_resp.is_error:
+        raise GitHubPRError(
+            "Cannot fetch file contents for the patch target: "
+            f"HTTP {content_resp.status_code}"
+        )
+    else:
+        try:
+            data = content_resp.json()
+            # Contents API returns base64-encoded content (may be list for dir)
+            if isinstance(data, list):
+                raise GitHubPRError(
+                    "Patch target resolves to a directory, not a file."
+                )
+            b64 = data.get("content", "")
+            # Content may contain newlines; GitHub wraps at 60 chars
+            b64_clean = "".join(b64.split())
+            original_text = (
+                base64.b64decode(b64_clean).decode(
+                    "utf-8", errors="replace"
+                )
+                if b64_clean
+                else ""
+            )
+        except GitHubPRError:
+            raise
+        except Exception as exc:
+            raise GitHubPRError(
+                "Cannot decode the current file contents for the patch target."
+            ) from exc
+
+    new_text = _apply_unified_diff_to_content(original_text, file_patch)
+    return (is_deletion, original_text, new_text)
+
+
 async def dry_run_patch_at_sha(
     owner: str,
     repo: str,
@@ -1402,87 +1507,19 @@ async def dry_run_patch_at_sha(
 
     async with httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS) as client:
         for file_path, file_patch in per_file_patches.items():
-            # Same last line of defence as commit_patch before any apply.
-            if len(file_path) > 255 or not _BRANCH_RE.match(
-                file_path.replace("/", "_")
-            ):
-                if (
-                    ".." in file_path
-                    or file_path.startswith("/")
-                    or "//" in file_path
-                ):
-                    raise GitHubPRValidationError(
-                        "Refusing to apply remediation diff: invalid file path."
-                    )
-
-            # Check for explicit file deletion (same detection as commit_patch)
-            is_deletion = False
-            patch_lines = file_patch.splitlines()
-            if len(patch_lines) >= 2:
-                second_line = patch_lines[1].strip()
-                if (
-                    second_line
-                    in (
-                        "+++ /dev/null",
-                        "+++ b/dev/null",
-                        "+++ b//dev/null",
-                        "+++ dev/null",
-                    )
-                    or "/dev/null" in second_line
-                ):
-                    is_deletion = True
-
-            # Fetch current file content at the base SHA (may be 404 for a
-            # new file). Same decode as commit_patch.
-            try:
-                content_resp = await client.get(
-                    f"{api}/contents/{quote(file_path, safe='/')}",
-                    headers=headers,
-                    params={"ref": base_sha},
-                )
-            except httpx.RequestError as exc:
-                raise GitHubPRError(
-                    "Network error fetching contents for "
-                    f"{file_path!r}: {exc.__class__.__name__}"
-                ) from exc
-            if content_resp.status_code == 404:
-                if is_deletion:
-                    continue
-                original_text = ""
-            elif content_resp.is_error:
-                raise GitHubPRError(
-                    "Cannot fetch file contents for the patch target: "
-                    f"HTTP {content_resp.status_code}"
-                )
-            else:
-                try:
-                    data = content_resp.json()
-                    # Contents API returns base64-encoded content (may be list for dir)
-                    if isinstance(data, list):
-                        raise GitHubPRError(
-                            "Patch target resolves to a directory, not a file."
-                        )
-                    b64 = data.get("content", "")
-                    # Content may contain newlines; GitHub wraps at 60 chars
-                    b64_clean = "".join(b64.split())
-                    original_text = (
-                        base64.b64decode(b64_clean).decode(
-                            "utf-8", errors="replace"
-                        )
-                        if b64_clean
-                        else ""
-                    )
-                except GitHubPRError:
-                    raise
-                except Exception as exc:
-                    raise GitHubPRError(
-                        "Cannot decode the current file contents for the patch target."
-                    ) from exc
-
-            if (
-                _apply_unified_diff_to_content(original_text, file_patch)
-                is None
-            ):
+            fetched = await _fetch_original_and_apply(
+                client,
+                api=api,
+                headers=headers,
+                file_path=file_path,
+                file_patch=file_patch,
+                ref=base_sha,
+            )
+            if fetched is None:
+                # Deletion target already absent — nothing to apply.
+                continue
+            _is_deletion, original_text, new_text = fetched
+            if new_text is None:
                 return _describe_apply_mismatch(
                     original_text, file_patch, file_path
                 )
@@ -1589,80 +1626,21 @@ async def commit_patch(
             )
 
         for file_path, file_patch in per_file_patches.items():
-            # The shared validator already rejects traversal and absolute
-            # paths; this is the last line of defence before the tree API.
-            if len(file_path) > 255 or not _BRANCH_RE.match(
-                file_path.replace("/", "_")
-            ):
-                if (
-                    ".." in file_path
-                    or file_path.startswith("/")
-                    or "//" in file_path
-                ):
-                    raise GitHubPRValidationError(
-                        "Refusing to apply remediation diff: invalid file path."
-                    )
-
-            # Check for explicit file deletion
-            is_deletion = False
-            patch_lines = file_patch.splitlines()
-            if len(patch_lines) >= 2:
-                second_line = patch_lines[1].strip()
-                if (
-                    second_line in (
-                        "+++ /dev/null",
-                        "+++ b/dev/null",
-                        "+++ b//dev/null",
-                        "+++ dev/null",
-                    )
-                    or "/dev/null" in second_line
-                ):
-                    is_deletion = True
-
-            # Fetch current file content (may be new file → 404)
-            content_resp = await client.get(
-                f"{api}/contents/{quote(file_path, safe='/')}",
+            fetched = await _fetch_original_and_apply(
+                client,
+                api=api,
                 headers=headers,
-                params={"ref": head_sha},
+                file_path=file_path,
+                file_patch=file_patch,
+                ref=head_sha,
             )
-            if content_resp.status_code == 404:
-                if is_deletion:
-                    logger.info(
-                        "github.pr: deletion target already absent — skipping"
-                    )
-                    continue
-                original_text = ""
-            elif content_resp.is_error:
-                raise GitHubPRError(
-                    "Cannot fetch file contents for the patch target: "
-                    f"HTTP {content_resp.status_code}"
+            if fetched is None:
+                logger.info(
+                    "github.pr: deletion target already absent — skipping"
                 )
-            else:
-                try:
-                    data = content_resp.json()
-                    # Contents API returns base64-encoded content (may be list for dir)
-                    if isinstance(data, list):
-                        raise GitHubPRError(
-                            "Patch target resolves to a directory, not a file."
-                        )
-                    b64 = data.get("content", "")
-                    # Content may contain newlines; GitHub wraps at 60 chars
-                    b64_clean = "".join(b64.split())
-                    original_text = (
-                        base64.b64decode(b64_clean).decode(
-                            "utf-8", errors="replace"
-                        )
-                        if b64_clean
-                        else ""
-                    )
-                except GitHubPRError:
-                    raise
-                except Exception as exc:
-                    raise GitHubPRError(
-                        "Cannot decode the current file contents for the patch target."
-                    ) from exc
+                continue
+            is_deletion, original_text, new_text = fetched
 
-            new_text = _apply_unified_diff_to_content(original_text, file_patch)
             if new_text is None:
                 raise GitHubPRValidationError(
                     "Refusing to apply remediation diff: hunk context does not "
