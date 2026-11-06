@@ -1056,16 +1056,34 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     return files
 
 
+def _split_eol(line: str) -> tuple[str, str]:
+    """Return (content, line_ending) for a line from splitlines(keepends=True)."""
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n") or line.endswith("\r"):
+        return line[:-1], line[-1]
+    return line, ""
+
+
 def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str | None:
     """
     Apply a per-file unified diff segment to original_text.
 
     Returns new_text on success, None if hunk context does not match (mismatch).
     Handles multiple hunks per file, context lines, additions, deletions.
+
+    Preserves the file's line endings: copied lines keep their own ending and
+    lines the patch adds get the file's dominant ending, so a CRLF file is not
+    rewritten to LF and a file without a trailing newline keeps it.
     """
-    orig_lines = original_text.splitlines()
-    # Keep trailing newline info
-    had_trailing_newline = original_text.endswith("\n") if original_text else True
+    orig_lines: list[str] = []
+    orig_eols: list[str] = []
+    for kept in original_text.splitlines(keepends=True):
+        content, eol = _split_eol(kept)
+        orig_lines.append(content)
+        orig_eols.append(eol)
+    # Ending for lines the patch adds: match the target file (CRLF stays CRLF).
+    add_eol = "\r\n" if "\r\n" in original_text else "\n"
 
     # Extract hunks: each @@ header + body lines
 
@@ -1079,8 +1097,9 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
             break
     if hunk_start is None:
         return None
-    # Build new content by walking original lines and hunks
-    new_lines: list[str] = []
+    # Build new content by walking original lines and hunks; each entry is
+    # (content, line_ending) so the original endings survive the round-trip.
+    new_lines: list[tuple[str, str]] = []
     orig_idx = 0  # 0-based index into orig_lines
 
     i = hunk_start
@@ -1098,7 +1117,7 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
             target_idx = max(0, old_start - 1)
             # Copy unchanged lines before hunk
             while orig_idx < target_idx and orig_idx < len(orig_lines):
-                new_lines.append(orig_lines[orig_idx])
+                new_lines.append((orig_lines[orig_idx], orig_eols[orig_idx]))
                 orig_idx += 1
             old_remaining = old_len
             new_remaining = new_len
@@ -1118,7 +1137,7 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         or orig_lines[orig_idx] != hunk_line[1:]
                     ):
                         return None
-                    new_lines.append(orig_lines[orig_idx])
+                    new_lines.append((orig_lines[orig_idx], orig_eols[orig_idx]))
                     orig_idx += 1
                     old_remaining -= 1
                     new_remaining -= 1
@@ -1133,7 +1152,7 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                     old_remaining -= 1
                 elif hunk_line.startswith("+"):
                     # Addition — insert
-                    new_lines.append(hunk_line[1:])
+                    new_lines.append((hunk_line[1:], add_eol))
                     new_remaining -= 1
                 elif hunk_line.startswith("\\"):
                     # No newline at end of file marker — ignore
@@ -1141,10 +1160,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                 elif hunk_line == "":
                     # Empty line treated as context of empty string (rare)
                     if orig_idx < len(orig_lines) and orig_lines[orig_idx] == "":
-                        new_lines.append("")
+                        new_lines.append((orig_lines[orig_idx], orig_eols[orig_idx]))
                         orig_idx += 1
                     else:
-                        new_lines.append("")
+                        new_lines.append(("", add_eol))
                     old_remaining -= 1
                     new_remaining -= 1
                 else:
@@ -1157,13 +1176,18 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
 
     # Copy remaining original lines after last hunk
     while orig_idx < len(orig_lines):
-        new_lines.append(orig_lines[orig_idx])
+        new_lines.append((orig_lines[orig_idx], orig_eols[orig_idx]))
         orig_idx += 1
 
-    result = "\n".join(new_lines)
-    if had_trailing_newline or result:
-        result += "\n"
-    return result
+    if not new_lines:
+        return ""
+    # A copied line that was the file's last with no newline only stays bare
+    # at EOF; anywhere else it needs an ending to keep the file well-formed.
+    for idx in range(len(new_lines) - 1):
+        content, eol = new_lines[idx]
+        if eol == "":
+            new_lines[idx] = (content, add_eol)
+    return "".join(content + eol for content, eol in new_lines)
 
 
 async def commit_patch(

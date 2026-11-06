@@ -808,6 +808,45 @@ def test_apply_unified_diff_ignores_blank_line_between_hunks() -> None:
     assert _apply_unified_diff_to_content(original, file_patch) == "A\nb\nC\nd\n"
 
 
+def test_apply_unified_diff_preserves_crlf_line_endings() -> None:
+    """A patch against a CRLF file must not rewrite the whole file to LF."""
+    original = "a\r\nb\r\nc\r\nd\r\n"
+    file_patch = (
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -2,1 +2,1 @@\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB\r\nc\r\nd\r\n"
+
+
+def test_apply_unified_diff_added_lines_use_file_line_endings() -> None:
+    """Lines a patch adds to a CRLF file get CRLF, not LF."""
+    original = "a\r\nb\r\n"
+    file_patch = (
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -1,1 +1,2 @@\n"
+        " a\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB\r\nb\r\n"
+
+
+def test_apply_unified_diff_preserves_missing_trailing_newline() -> None:
+    """A file with no newline at EOF keeps it after an interior edit."""
+    original = "a\nb\nc"
+    file_patch = (
+        "--- a/file.txt\n"
+        "+++ b/file.txt\n"
+        "@@ -2,1 +2,1 @@\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB\nc"
+
+
 @pytest.mark.anyio
 async def test_commit_patch_with_deletion_produces_null_sha_tree_entry() -> None:
     """commit_patch for deleted file creates tree entry with sha=None without creating blob."""
