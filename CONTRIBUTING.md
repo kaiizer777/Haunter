@@ -1,6 +1,6 @@
 # Contributing to Haunter
 
-Haunter is a production system (real repos, real CI, real PRs). Treat every change as shippable. See [`AGENTS.md`](AGENTS.md) (repo conventions, test commands), [`HAUNTER.md`](HAUNTER.md) (architecture), and [`WORK.md`](WORK.md) (phased plan) before starting.
+Haunter is a production system (real repos, real CI, real PRs). Treat every change as shippable. See [`HAUNTER.md`](HAUNTER.md) (architecture) and [`infra/redeploy.md`](infra/redeploy.md) (deploy runbook) before starting.
 
 ## Setup
 
@@ -43,6 +43,10 @@ FRONTEND_URL=http://localhost:3011
 OPENCODE_ZEN_API_KEY=<opencode-zen-api-key>
 OPENCODE_ZEN_BASE_URL=https://opencode.ai/zen/v1
 DEFAULT_MODEL=nemotron-3.5-lightning-free
+GITHUB_WEBHOOK_SECRET=<hmac-secret-for-webhooks>
+GITHUB_TOKEN=<dev-personal-access-token>
+# GITHUB_APP_ID=<github-app-id>
+# GITHUB_APP_PRIVATE_KEY="<github-app-private-key-pem>"
 ```
 
 `DATABASE_URL` serves the app; `TEST_DATABASE_URL` must point at a local throwaway Postgres (never production or a shared Neon branch — the test harness refuses to run otherwise). OAuth keys gate the multi-repo dashboard; model URL/keys select the provider.

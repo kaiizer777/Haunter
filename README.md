@@ -26,7 +26,7 @@ Open source, self-hosted, yours. Bring your own keys and point it at your repos 
 
 ## 🔍 Your personal PR & DevOps bot
 
-Fork this repo, point it at your GitHub repositories, and Haunter works for you around the clock. Every pull request gets reviewed across four dimensions — with confident findings reported in the review.
+Fork this repo, deploy your own copy, point it at your GitHub repositories, and Haunter works for you around the clock with 3 powers — **review PRs** (`opened`, `synchronize`, `ready_for_review`, `reopened`), **fix tagged issues + raise PRs** (`@haunter` / `@haunter-bot` / `/fix`, `@haunter-auditor fix this issue`), and **join the convo on tag** (`@haunter-auditor` answered in-thread). Every pull request gets reviewed across four dimensions — with confident findings reported in the review.
 
 <br/>
 
