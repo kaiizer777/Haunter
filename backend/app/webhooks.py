@@ -273,6 +273,20 @@ _AUDITOR_DEDUP_STATUSES = frozenset(
     }
 )
 
+# Issue #275: terminal fix-run statuses. A prior root run in one of these
+# statuses with no PR (pr_number null and pr_url unset) releases the issue so
+# a retry trigger mints a fresh run. Active runs, or any run that raised a PR,
+# still hold the issue (duplicate).
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        "pr_opened",
+        "fallback_commented",
+        "flaky_detected",
+        "completed",
+        "error",
+    }
+)
+
 AUDITOR_QA_SYSTEM_PROMPT = (
     "You are Haunter Auditor, a senior production engineer answering a "
     "reviewer question on a GitHub pull request. Be concise (under 300 words), "
@@ -2334,7 +2348,11 @@ async def _handle_issue_trigger(
     existing_issue_run = await _find_existing_issue_root_run(
         db, repo.id, issue_number
     )
-    if existing_issue_run is not None:
+    if existing_issue_run is not None and (
+        getattr(existing_issue_run, "status", None) not in _TERMINAL_RUN_STATUSES
+        or getattr(existing_issue_run, "pr_number", None) is not None
+        or getattr(existing_issue_run, "pr_url", None)
+    ):
         logger.info(
             "Duplicate issue trigger %s for %s#%d: run %s already owns it",
             delivery_id,
