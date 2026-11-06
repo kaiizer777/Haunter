@@ -1032,6 +1032,77 @@ async def test_commit_patch_with_deletion_mismatched_hunk_raises() -> None:
 
 
 @pytest.mark.anyio
+async def test_commit_patch_multifile_mismatch_writes_no_tree_or_commit() -> None:
+    """A mismatch in a later file still fails closed at the commit boundary.
+
+    `commit_patch` creates blobs per file inside the loop, so when the first
+    file applies and the second mismatches, the first file's blob may exist
+    as an unreferenced object — but no tree, commit, or ref update may
+    follow, so nothing lands on the branch (cubic review on PR #271).
+    """
+    import base64
+
+    multifile_patch = (
+        "--- a/good.py\n"
+        "+++ b/good.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+        "--- a/bad.py\n"
+        "+++ b/bad.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-totally-different-content\n"
+        "+new-content\n"
+    )
+
+    with respx.mock(base_url="https://api.github.com", assert_all_called=False) as rx:
+        rx.get("/repos/test-org/test-repo/git/ref/heads/haunter/fix-test").mock(
+            return_value=httpx.Response(200, json={"object": {"sha": "head_sha_111"}})
+        )
+        rx.get("/repos/test-org/test-repo/git/commits/head_sha_111").mock(
+            return_value=httpx.Response(200, json={"tree": {"sha": "base_tree_sha_222"}})
+        )
+        rx.get("/repos/test-org/test-repo/contents/good.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"old\n").decode("ascii")},
+            )
+        )
+        rx.get("/repos/test-org/test-repo/contents/bad.py?ref=head_sha_111").mock(
+            return_value=httpx.Response(
+                200,
+                json={"content": base64.b64encode(b"actual-content\n").decode("ascii")},
+            )
+        )
+        rx.post("/repos/test-org/test-repo/git/blobs").mock(
+            return_value=httpx.Response(201, json={"sha": "blob_sha"})
+        )
+        tree_route = rx.post("/repos/test-org/test-repo/git/trees").mock(
+            return_value=httpx.Response(201, json={"sha": "tree_sha"})
+        )
+        commit_route = rx.post("/repos/test-org/test-repo/git/commits").mock(
+            return_value=httpx.Response(201, json={"sha": "commit_sha"})
+        )
+        ref_route = rx.patch(
+            "/repos/test-org/test-repo/git/refs/heads/haunter/fix-test"
+        ).mock(return_value=httpx.Response(200, json={"object": {"sha": "commit_sha"}}))
+
+        with pytest.raises(GitHubPRValidationError, match="does not match"):
+            await commit_patch(
+                owner="test-org",
+                repo="test-repo",
+                branch="haunter/fix-test",
+                patch_text=multifile_patch,
+                commit_msg="fix: something",
+                token="fake_token",
+            )
+
+    assert not tree_route.called
+    assert not commit_route.called
+    assert not ref_route.called
+
+
+@pytest.mark.anyio
 async def test_commit_patch_rejects_malformed_diff_before_http() -> None:
     """Malformed patches raise before the first GitHub request."""
     malformed_patch = (
