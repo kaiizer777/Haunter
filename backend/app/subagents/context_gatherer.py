@@ -1073,12 +1073,20 @@ _ISSUE_DISCUSSION_BUDGET = 3
 
 
 async def _fetch_issue_discussion(
-    owner: str, repo: str, issue_number: int
+    owner: str,
+    repo: str,
+    issue_number: int,
+    token: Optional[str] = None,
 ) -> list[dict[str, Any]]:
     """One bounded page of issue comments as plain dicts (empty on refusal)."""
     budget = gh.GitHubRequestBudget(limit=_ISSUE_DISCUSSION_BUDGET)
     page = await gh.fetch_issue_comments(
-        owner=owner, repo=repo, issue_number=issue_number, budget=budget
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        budget=budget,
+        token=token,
+        allow_global_token=False,
     )
     if isinstance(page, gh.IssueCommentPage):
         return [c for c in page.comments if isinstance(c, dict)]
