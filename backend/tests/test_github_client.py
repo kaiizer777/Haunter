@@ -141,6 +141,18 @@ def test_build_headers_fail_closed_no_token(monkeypatch: pytest.MonkeyPatch):
         _build_headers(token=None, allow_global_token=False)
 
 
+def test_build_headers_fail_closed_global_pat_only(monkeypatch: pytest.MonkeyPatch):
+    """Only settings.github_token configured + allow_global_token=False raises and issues no HTTP request."""
+    monkeypatch.setattr(settings, "github_token", "env_secret_token")
+    import httpx as _httpx
+    from unittest.mock import patch
+
+    with patch("httpx.AsyncClient") as mock_client:
+        with pytest.raises(GitHubAuthError):
+            _build_headers(token=None, allow_global_token=False)
+        mock_client.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # fetch_repo_tree_paths tests
 # ---------------------------------------------------------------------------
