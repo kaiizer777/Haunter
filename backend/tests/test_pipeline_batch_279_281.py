@@ -7,10 +7,10 @@
 #281: the mirror push gate fail-closes (shared PR applier, exact paths) so a
       verify-pass guarantees a dry-run-pass; legacy fuzzy helpers unchanged.
 
-#282 paths (Phase-8 regen loop, refinement pre-check, fresh base SHA) need a
-DB-backed pipeline run; they are covered by the synced suites
-(test_pr_dry_run_retry_276, test_orchestrator_pipeline, test_pr_feedback,
-test_followup_reply), not here.
+#282 guards (refinement pre-check, fresh base SHA, regen feedback) are
+covered hermetically in the #282 section below; the DB-backed pipeline
+runs live in the synced suites (test_pr_dry_run_retry_276,
+test_orchestrator_pipeline, test_pr_feedback, test_followup_reply).
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ from app.subagents.fix_generator import (
     FixGenerationError,
     FixOutputTruncatedError,
     PatchFormatRejected,
+    PatchFormatRetryExhausted,
     PatchRejected,
     _call_and_parse,
     _call_with_format_retry,
@@ -109,18 +110,21 @@ async def test_truncated_patch_regenerates_then_exhausts_without_persisting() ->
     first = _llm_response(TRUNCATED_PATCH)
     second = _llm_response(TRUNCATED_PATCH)
     mock_complete = AsyncMock(side_effect=[first, second])
+    mock_db = AsyncMock()
     with (
         patch("app.subagents.fix_generator.LLMClient.complete", mock_complete),
-        pytest.raises(PatchFormatRejected),
+        pytest.raises(PatchFormatRetryExhausted) as exc_info,
     ):
         await _call_with_format_retry(
             messages=[{"role": "system", "content": "sys"}],
             diagnosis_summary="ImportError in app.py",
             prior_attempt=None,
-            db=AsyncMock(),
+            db=mock_db,
             run_id=uuid.uuid4(),
         )
+    assert type(exc_info.value) is PatchFormatRetryExhausted
     assert mock_complete.call_count == 2
+    mock_db.add.assert_not_called()
 
 
 # ------------------------------------------------------------------ #280 ---
