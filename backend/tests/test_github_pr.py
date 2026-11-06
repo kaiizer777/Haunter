@@ -927,6 +927,63 @@ def test_apply_unified_diff_applies_no_newline_marker() -> None:
     assert _apply_unified_diff_to_content(original, file_patch) == "line1\nLINE2"
 
 
+def test_head_only_hunk_keeps_unterminated_eof() -> None:
+    """A head-only hunk on an unterminated file must not gain a newline."""
+    original = "x\ny"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-x\n"
+        "+X\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "X\ny"
+
+
+def test_marker_strip_survives_tail_on_terminated() -> None:
+    """A hunk-end marker strips the newline even if the original had one."""
+    original = "a\nb\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB"
+
+
+def test_marker_strip_survives_tail_on_terminated_crlf() -> None:
+    """CRLF twin: the marker strip survives the tail gate with CRLF endings."""
+    original = "a\r\nb\r\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+        "\\ No newline at end of file\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\r\nB"
+
+
+def test_terminated_no_marker_keeps_trailing_newline() -> None:
+    """A terminated original without a marker keeps its trailing newline."""
+    original = "a\nb\n"
+    file_patch = (
+        "--- a/f.txt\n"
+        "+++ b/f.txt\n"
+        "@@ -1,2 +1,2 @@\n"
+        " a\n"
+        "-b\n"
+        "+B\n"
+    )
+    assert _apply_unified_diff_to_content(original, file_patch) == "a\nB\n"
+
+
 @pytest.mark.anyio
 async def test_commit_patch_genuine_mismatch_raises_with_zero_writes() -> None:
     """Content mismatch beyond whitespace still fails closed (issue #270).

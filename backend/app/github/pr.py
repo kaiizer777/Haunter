@@ -1095,9 +1095,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
 
     hunk_header_re = re.compile(r"^@@\s+-(\d+),?(\d*)\s+\+(\d+),?(\d*)\s+@@")
     lines = file_patch.splitlines()
-    has_no_newline_marker = any(
-        ln == _NO_NEWLINE_MARKER or ln.startswith("\\") for ln in lines
-    )
+    # Tracks whether a "\ No newline at end of file" marker actually
+    # stripped a newline: only then must the tail gate below not re-append
+    # one. (Each marker is resolved per-marker at its hunk end instead.)
+    stripped_trailing_newline = False
     # Skip file header lines (---/+++) until first @@
     hunk_start = None
     for i, ln in enumerate(lines):
@@ -1181,8 +1182,10 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
                         last = new_lines[-1]
                         if last.endswith("\r\n"):
                             new_lines[-1] = last[:-2]
+                            stripped_trailing_newline = True
                         elif last.endswith("\n"):
                             new_lines[-1] = last[:-1]
+                            stripped_trailing_newline = True
                     prev_kind = None
                     i += 1
                     continue
@@ -1249,7 +1252,8 @@ def _apply_unified_diff_to_content(original_text: str, file_patch: str) -> str |
     if (
         result
         and not result.endswith(("\r\n", "\n"))
-        and (had_trailing_newline or not has_no_newline_marker)
+        and had_trailing_newline
+        and not stripped_trailing_newline
     ):
         result += nl
     return result
