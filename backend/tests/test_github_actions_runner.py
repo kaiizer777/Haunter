@@ -18,6 +18,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import time
 import uuid
@@ -33,6 +34,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 
 from app.sandbox.github_actions_runner import (
     _NON_RETRYABLE_GITHUB_PHRASES,
+    _PEM_CACHE,
+    _PEM_LOAD_MAX_ATTEMPTS,
     _clear_token_cache_for_tests,
     _extract_file_paths_from_patch,
     _get_workflow_run_log_tail,
@@ -42,6 +45,7 @@ from app.sandbox.github_actions_runner import (
     _load_workflow_template,
     _non_retryable_reason,
     _push_workflow_file,
+    _refresh_seed_with_fresh_context,
     _resolve_user_github_id,
     GitHubActionsSandboxRunner,
     mint_installation_token,
@@ -126,8 +130,75 @@ async def test_load_pem_from_ssm_timeout(monkeypatch: pytest.MonkeyPatch) -> Non
         raise asyncio.TimeoutError()
 
     monkeypatch.setattr(asyncio, "wait_for", _mock_wait_for)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
     with pytest.raises(RuntimeError, match="SSM get_parameter timed out"):
         await _load_pem_from_ssm("/test/timeout_key")
+
+
+@pytest.mark.asyncio
+async def test_load_pem_from_ssm_timeout_retries_then_succeeds(
+    rsa_keys: tuple[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One SSM timeout retries with backoff; the retry success is cached."""
+    priv_pem, _ = rsa_keys
+    mock_client = MagicMock()
+    mock_client.get_parameter.return_value = {"Parameter": {"Value": priv_pem}}
+
+    mock_boto3 = MagicMock()
+    mock_boto3.client.return_value = mock_client
+    monkeypatch.setattr("boto3.client", mock_boto3.client)
+
+    real_wait_for = asyncio.wait_for
+    calls = {"n": 0}
+
+    async def _flaky_wait_for(coro, timeout):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            try:
+                coro.close()
+            except Exception:
+                pass
+            raise asyncio.TimeoutError()
+        return await real_wait_for(coro, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", _flaky_wait_for)
+    sleeps: list[float] = []
+
+    async def _fast_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _fast_sleep)
+
+    assert await _load_pem_from_ssm("/test/flaky_key") == priv_pem
+    assert calls["n"] == 2
+    assert sleeps == [1.0]
+    # Cached: no further SSM round-trip.
+    assert await _load_pem_from_ssm("/test/flaky_key") == priv_pem
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_load_pem_from_ssm_timeout_exhausts_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Persistent SSM timeout raises after max attempts; nothing is cached."""
+    waits = {"n": 0}
+
+    async def _always_timeout(coro, timeout):
+        waits["n"] += 1
+        try:
+            coro.close()
+        except Exception:
+            pass
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(asyncio, "wait_for", _always_timeout)
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="SSM get_parameter timed out"):
+        await _load_pem_from_ssm("/test/dead_key")
+    assert waits["n"] == _PEM_LOAD_MAX_ATTEMPTS
+    assert "/test/dead_key" not in _PEM_CACHE
 
 
 @pytest.mark.asyncio
@@ -144,6 +215,92 @@ async def test_load_pem_from_ssm_boto3_exception(
 
     with pytest.raises(RuntimeError, match="SSM get_parameter failed"):
         await _load_pem_from_ssm("/test/missing_key")
+
+
+# ---------------------------------------------------------------------------
+# _refresh_seed_with_fresh_context tests (issue #287)
+# ---------------------------------------------------------------------------
+
+_README_PATCH = (
+    "diff --git a/README.md b/README.md\n"
+    "--- a/README.md\n"
+    "+++ b/README.md\n"
+    "@@ -1,2 +1,2 @@\n"
+    " line1\n"
+    "-line2 stale\n"
+    "+line2 fresh\n"
+    "diff --git a/NEW.md b/NEW.md\n"
+    "--- /dev/null\n"
+    "+++ b/NEW.md\n"
+    "@@ -0,0 +1 @@\n"
+    "+hello\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_refresh_seed_overlays_fresh_context() -> None:
+    """Patch targets get fresh Contents bytes; other files and creations are untouched."""
+    fresh_readme = b"line1\nline2 fresh\n"
+    payload = base64.b64encode(fresh_readme).decode("ascii")
+    seed = {"README.md": b"line1\nline2 stale\n", "OTHER.md": b"keep\n"}
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        route = respx_mock.get("/repos/o/r/contents/README.md").respond(
+            200, json={"content": payload, "encoding": "base64"}
+        )
+        async with httpx.AsyncClient() as client:
+            out = await _refresh_seed_with_fresh_context(
+                client=client,
+                user_repo_full="o/r",
+                head_sha="abc123",
+                token="tok",
+                fallback_token=None,
+                seed_files=seed,
+                patch_text=_README_PATCH,
+            )
+    assert out["README.md"] == fresh_readme
+    assert out["OTHER.md"] == b"keep\n"
+    assert route.call_count == 1  # NEW.md creation triggers no fetch
+
+
+@pytest.mark.asyncio
+async def test_refresh_seed_keeps_tarball_on_fetch_failure() -> None:
+    """A 404 for the fresh read keeps tarball bytes (fail-soft, gate stays strict)."""
+    seed = {"README.md": b"line1\nline2 stale\n"}
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        respx_mock.get("/repos/o/r/contents/README.md").respond(
+            404, json={"message": "Not Found"}
+        )
+        async with httpx.AsyncClient() as client:
+            out = await _refresh_seed_with_fresh_context(
+                client=client,
+                user_repo_full="o/r",
+                head_sha="abc123",
+                token="tok",
+                fallback_token=None,
+                seed_files=seed,
+                patch_text=_README_PATCH,
+            )
+    assert out == seed
+
+
+@pytest.mark.asyncio
+async def test_refresh_seed_keeps_tarball_on_network_error() -> None:
+    """A transport error keeps tarball bytes instead of failing verification."""
+    seed = {"README.md": b"line1\nline2 stale\n"}
+    with respx.mock(base_url="https://api.github.com") as respx_mock:
+        route = respx_mock.get("/repos/o/r/contents/README.md")
+        route.side_effect = httpx.ConnectError("connection reset")
+        async with httpx.AsyncClient() as client:
+            out = await _refresh_seed_with_fresh_context(
+                client=client,
+                user_repo_full="o/r",
+                head_sha="abc123",
+                token="tok",
+                fallback_token=None,
+                seed_files=seed,
+                patch_text=_README_PATCH,
+            )
+    assert out == seed
 
 
 # ---------------------------------------------------------------------------

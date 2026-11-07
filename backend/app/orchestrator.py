@@ -746,6 +746,41 @@ def check_fast_fail(
     return False, "non_llm_repeat"
 
 
+_NON_RETRYABLE_PREFIX = "[non-retryable]"
+
+
+def is_non_retryable_failure(failure_reason: Optional[str]) -> bool:
+    """True when a sandbox failure is marked terminal (issue #288).
+
+    Mirror fail-closed refusals and other deterministic sandbox errors carry
+    a ``[non-retryable]`` prefix. Retrying the same patch cannot heal them,
+    so the verify path aborts the retry loop straight to fallback instead
+    of burning the remaining attempts on an identical failure.
+    """
+    return bool(failure_reason) and _NON_RETRYABLE_PREFIX in failure_reason
+
+
+def record_verification_failure(
+    *,
+    decisions: list[str],
+    failure_reason: Optional[str],
+    attempt_number: int,
+) -> Optional[str]:
+    """Record a failed sandbox verification (issue #288 wiring).
+
+    Appends verification_failed_attempt_{n} always; when the reason
+    carries the [non-retryable] prefix also appends
+    non_retryable_abort_attempt_{n} and returns non_retryable
+    so the caller breaks the retry loop straight to fallback.
+    Returns None for ordinary failures (caller keeps retrying).
+    """
+    decisions.append(f"verification_failed_attempt_{attempt_number}")
+    if is_non_retryable_failure(failure_reason):
+        decisions.append(f"non_retryable_abort_attempt_{attempt_number}")
+        return "non_retryable"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Phase-8 / refinement PR-apply guards (fail-closed; extracted as helpers so
 # the hermetic batch suite can pin them without a DB-backed pipeline run)
@@ -1899,10 +1934,15 @@ async def _orchestrator_pipeline_body(
                     skip_to_fallback_reason = "sandbox_verification_disabled"
                     break
 
-                # ---- Patch failed ----
-                state["decisions"].append(
-                    f"verification_failed_attempt_{attempt.attempt_number}"
+                # ---- Patch failed: record + non-retryable abort (#288) ----
+                non_retryable_reason = record_verification_failure(
+                    decisions=state["decisions"],
+                    failure_reason=failure_reason,
+                    attempt_number=attempt.attempt_number,
                 )
+                if non_retryable_reason is not None:
+                    skip_to_fallback_reason = non_retryable_reason
+                    break
 
                 # ---- Fast-fail on repeated failure_reason (Phase 1, BLOCKER-1 / NICE-1) ----
                 # If the trailing N chars of this attempt's failure_reason match
