@@ -629,3 +629,30 @@ async def test_push_succeeds_for_exact_patch() -> None:
                 seed_files=dict(SEEDS),
             )
     assert sha == "c"
+
+
+# --------------------------------------- seedless structural validation ---
+# Without a seed the gate skips only base-content matching (#164 contract);
+# malformed patches are still rejected before any tree write.
+
+
+def test_gate_rejects_truncated_patch_without_seed() -> None:
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    with pytest.raises(ValueError, match="not a valid unified diff"):
+        _fail_closed_push_gate(TRUNCATED_PATCH, {})
+
+
+def test_gate_rejects_garbage_patch_without_seed() -> None:
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    with pytest.raises(ValueError, match="not a valid unified diff"):
+        _fail_closed_push_gate("this is not a diff", {})
+
+
+def test_gate_accepts_valid_creation_without_seed() -> None:
+    from app.sandbox.mirror import _fail_closed_push_gate
+
+    _fail_closed_push_gate(
+        "--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+hello\n", {}
+    )

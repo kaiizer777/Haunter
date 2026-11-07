@@ -911,11 +911,17 @@ def _fail_closed_push_gate(patch_text: str, base_files: dict[str, bytes]) -> Non
     strip-tier fallbacks are unreachable for gated content. The mirror
     workflow file is not a valid patch target.
 
-    Seedless pushes (no mirrored tree) skip the gate: with no base content
-    there is nothing to check parity against, and the push path below treats
-    targets as new files (#164 seedless-verify contract).
+    Seedless pushes (no mirrored tree) skip only the base-content matching:
+    structural validation still runs, and the push path below treats targets
+    as new files (#164 seedless-verify contract).
     """
     if not base_files:
+        try:
+            validate_unified_diff(patch_text)
+        except InvalidUnifiedDiffError as exc:
+            raise ValueError(
+                f"push_patch_to_mirror: patch is not a valid unified diff: {exc}"
+            ) from exc
         return
     from app.github.pr import _apply_unified_diff_to_content
 
