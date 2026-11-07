@@ -36,8 +36,11 @@ from app.subagents.fix_generator import (
     PatchRejected,
     PatchFormatRejected,
     PatchFormatRetryExhausted,
+    _FIX_MAX_TOKENS,
     _build_messages,
     _call_with_format_retry,
+    _detect_truncation,
+    _effective_max_tokens,
     _strip_markdown_fences,
     _validate_patch,
     generate_fix,
@@ -250,6 +253,7 @@ async def test_orchestrator_advances_to_pending_pr(db: AsyncSession) -> None:
         ),
         patch("app.github.pr.create_branch", new_callable=AsyncMock),
         patch("app.github.pr.dry_run_patch_at_sha", new_callable=AsyncMock, return_value=None),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch("app.github.pr.commit_patch", new_callable=AsyncMock),
         patch(
             "app.github.pr.open_pr",
@@ -1428,3 +1432,43 @@ def test_build_messages_warns_against_redacted_markers() -> None:
     )
     assert messages[0]["role"] == "system"
     assert "[REDACTED" in messages[0]["content"]
+
+
+def test_inferred_truncation_fires_at_effective_provider_budget() -> None:
+    """Reason-less output filling the clamped provider budget reads as truncated."""
+    effective = _effective_max_tokens(_FIX_MAX_TOKENS)
+    assert effective < _FIX_MAX_TOKENS
+    full = {"usage": {"output_tokens": effective}}
+    reason = _detect_truncation(full, effective)
+    assert reason is not None and "inferred" in reason
+    partial = {"usage": {"output_tokens": effective - 1}}
+    assert _detect_truncation(partial, effective) is None
+
+
+def test_validate_patch_rejects_trailing_blank_context_in_raw() -> None:
+    """Strict gate validates raw text: a trailing blank context line counts."""
+    valid_patch = (
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,2 +1,2 @@\n"
+        " line1\n"
+        "-old\n"
+        "+new\n"
+    )
+    _validate_patch(valid_patch)
+    with pytest.raises(PatchFormatRejected):
+        _validate_patch(valid_patch + " \n")
+
+
+def test_validate_patch_traversal_stays_hard_reject() -> None:
+    """Path violations stay fail-closed PatchRejected, never format-retried."""
+    traversal_patch = (
+        "--- a/../evil.py\n"
+        "+++ b/../evil.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    with pytest.raises(PatchRejected) as exc_info:
+        _validate_patch(traversal_patch)
+    assert type(exc_info.value) is PatchRejected

@@ -346,6 +346,7 @@ async def test_pipeline_pr_dry_run_mismatch_regenerates_once_then_proceeds(
             AsyncMock(return_value={"title": "fix: dry run", "body": "body"}),
         ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch(
             "app.github.pr.dry_run_patch_at_sha",
             AsyncMock(
@@ -442,6 +443,7 @@ async def test_pipeline_pr_dry_run_second_mismatch_errors_without_mutations(
             AsyncMock(return_value={"title": "fix: dry run", "body": "body"}),
         ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch(
             "app.github.pr.dry_run_patch_at_sha",
             AsyncMock(
@@ -530,6 +532,7 @@ async def test_pipeline_regen_uses_refreshed_pr_text_and_branch(
             ),
         ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch(
             "app.github.pr.dry_run_patch_at_sha",
             AsyncMock(
@@ -616,6 +619,7 @@ async def test_pipeline_regen_cost_over_ceiling_skips_github_writes(
             AsyncMock(return_value={"title": "fix: cost", "body": "body"}),
         ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         patch(
             "app.github.pr.dry_run_patch_at_sha",
             AsyncMock(
@@ -708,6 +712,7 @@ async def test_pipeline_deletion_only_absent_target_never_creates_branch(
             AsyncMock(return_value={"title": "fix: gone", "body": "body"}),
         ),
         patch("app.github.pr.get_installation_token", AsyncMock(return_value="tok")),
+        patch("app.github_client.fetch_branch_sha", AsyncMock(return_value="0123456789abcdef0123456789abcdef01234567")),
         respx.mock(
             base_url="https://api.github.com", assert_all_called=False
         ) as rx,

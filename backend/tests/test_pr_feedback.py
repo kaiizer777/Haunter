@@ -693,7 +693,7 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     refined_patch = (
         "--- a/calc.py\n"
         "+++ b/calc.py\n"
-        "@@ -1,2 +1,3 @@\n"
+        "@@ -1,1 +1,3 @@\n"
         "-def add(): pass\n"
         "+def add(a: int, b: int) -> int:\n"
         "+    '''Add two integers.'''\n"
@@ -743,6 +743,16 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
             return_value="fake_token",
         ),
         patch(
+            "app.github_client.fetch_branch_sha",
+            new_callable=AsyncMock,
+            return_value="abcdef99887766554433221100aabbccddeeff11",
+        ),
+        patch(
+            "app.github.pr.dry_run_patch_at_sha",
+            new_callable=AsyncMock,
+            return_value=None,
+        ) as mock_dry_run,
+        patch(
             "app.github.pr.commit_patch",
             new_callable=AsyncMock,
             return_value=fake_commit_sha,
@@ -767,6 +777,12 @@ async def test_successful_refinement_cycle(db: AsyncSession, user_factory):
     # Verify commit_patch was called on the existing branch
     mock_commit_patch.assert_called_once()
     assert mock_commit_patch.call_args[1]["branch"] == "haunter/fix-7b1c4e9f-1"
+
+    # Pre-check dry-ran the refined patch at the live HEAD before commit.
+    mock_dry_run.assert_called_once()
+    dry_run_kwargs = mock_dry_run.call_args[1]
+    assert dry_run_kwargs["patch_text"] == refined_patch
+    assert dry_run_kwargs["base_sha"] == "abcdef99887766554433221100aabbccddeeff11"
 
     # The confirmation is answered in the review thread that asked for it,
     # addressed to the triggering comment (carried on the run as

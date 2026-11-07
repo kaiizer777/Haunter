@@ -30,7 +30,7 @@ import re
 import time
 import uuid
 from pathlib import PurePosixPath
-from typing import Optional
+from typing import NoReturn, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import func, select
@@ -38,6 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.diff_validation import InvalidUnifiedDiffError, validate_unified_diff
 from app.llm import LLMClient
 from app.models import Attempt, Run
 from app.services.token_accounting import make_run_step, normalize_usage
@@ -116,6 +117,110 @@ class FixGenerationError(Exception):
     """Raised when LLM output fails Pydantic validation on both initial and retry calls."""
 
 
+class FixOutputTruncatedError(FixGenerationError):
+    """Raised when the provider reports the generation was cut by the token budget.
+
+    No retry: re-requesting the identical budget truncates identically, so the
+    retry would end as a generic parse failure hiding the cause. Mirrors
+    code_reviewer.ReviewOutputTruncatedError; subclasses FixGenerationError so
+    existing handlers keep working.
+    """
+
+
+#: Provider finish/stop reasons that are positive evidence the output budget
+#: ran out. Same vocabulary as code_reviewer.TRUNCATION_FINISH_REASONS:
+#: anything outside this set is unknown, never truncation.
+TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens", "max_output_tokens"})
+
+#: Output budget requested for fix-generation calls. _detect_truncation
+#: measures usage.output_tokens against the effective provider budget, so the
+#: inferred layer only fires when a reason-less response also fills that budget.
+_FIX_MAX_TOKENS: int = 10_000_000
+#: Lowest per-provider output-token ceiling enforced in app/llm. The fix
+#: call requests _FIX_MAX_TOKENS but each provider applies its own clamp
+#: (groq.py: 8192, anthropic.py: 8192, openai.py: 16384, opencode_zen.py:
+#: settings ceiling), so the inferred layer compares usage against
+#: min(requested, this cap) instead of the unreachable raw request.
+_MIN_KNOWN_PROVIDER_OUTPUT_CAP: int = 8_192
+
+
+def _effective_max_tokens(requested: int) -> int:
+    """Budget the provider actually enforces for an output-token request.
+
+    code_reviewer needs no equivalent: REVIEW_MAX_TOKENS (4096) already
+    sits below every provider cap, so requested == applied there.
+    """
+    return min(requested, _MIN_KNOWN_PROVIDER_OUTPUT_CAP)
+
+
+def _reported_finish_reason(response: dict) -> Optional[str]:
+    """Provider's verbatim end-of-generation reason, normalised, or None.
+
+    Reads finish_reason (and Anthropic's raw stop_reason). None means unknown,
+    never "stopped cleanly".
+    """
+    for key in ("finish_reason", "stop_reason"):
+        value = response.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return None
+
+
+def _provider_reported_truncation(response: dict) -> bool:
+    """True when the provider itself named a member of TRUNCATION_FINISH_REASONS."""
+    reason = _reported_finish_reason(response)
+    return reason is not None and reason in TRUNCATION_FINISH_REASONS
+
+
+def _budget_exhausted(response: dict, max_tokens: int) -> bool:
+    """True when the response consumed the entire requested output budget.
+
+    Same fallback as code_reviewer._budget_exhausted: the only signal from a
+    provider that omits finish_reason. Suspicion, not verdict — a generation
+    stopping exactly on the budget is indistinguishable from one cut there,
+    so callers act on it only when parsing also fails.
+    """
+    usage = response.get("usage")
+    if not isinstance(usage, dict):
+        return False
+    output_tokens = usage.get("output_tokens")
+    if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+        return output_tokens >= max_tokens
+    return False
+
+
+def _detect_truncation(response: dict, max_tokens: int) -> Optional[str]:
+    """Return why this response looks truncated, or None.
+
+    Positive evidence only: the provider naming a TRUNCATION_FINISH_REASONS
+    member, or the whole output budget spent with no reason reported. An
+    absent/unrecognised reason alone is unknown, never truncation — one
+    unlisted-but-benign value must not turn a complete generation into a
+    terminal "truncated" error. Mirrors code_reviewer._detect_truncation;
+    kept as a separate copy because the two callers act on it differently
+    (here: fail before persist; reviewer: confirm-by-parse, then skip retry).
+    """
+    reason = _reported_finish_reason(response)
+    if reason is not None:
+        return reason if reason in TRUNCATION_FINISH_REASONS else None
+    if _budget_exhausted(response, max_tokens):
+        return "length (inferred from usage.output_tokens)"
+    return None
+
+
+def _raise_truncated(reason: str, *, attempt: str) -> NoReturn:
+    """Log and raise FixOutputTruncatedError. NoReturn so callers cannot fall through into parsing a cut payload."""
+    logger.error(
+        "fix_generator: %soutput truncated by provider (finish_reason=%s) — refusing to persist a cut patch",
+        attempt,
+        reason,
+    )
+    raise FixOutputTruncatedError(
+        f"Fix generation {attempt} output was truncated by the provider "
+        f"(finish_reason={reason}). The patch is incomplete and was not stored."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Pydantic schema — strict mode: no coercion, no float→int, no str→int
 # ---------------------------------------------------------------------------
@@ -166,10 +271,12 @@ def _validate_patch(patch: str) -> None:
        - No blocked prefix (.git/, .github/workflows/)
        - Not empty
        - No '//' in the raw path string
+    4. Strict unified-diff validity via validate_unified_diff: exact hunk
+       counts, well-formed file/hunk headers, no envelope or sentinel leakage.
 
     Raises:
         PatchRejected: with a human-readable reason.
-        PatchFormatRejected: if patch lacks required diff markers (retriable).
+        PatchFormatRejected: if patch lacks required diff markers or fails strict unified-diff validation (retriable).
     """
     stripped = patch.strip()
     if not stripped:
@@ -201,6 +308,19 @@ def _validate_patch(patch: str) -> None:
     # give a basic validity check. But if we do find paths, validate each one.
     for raw_path in raw_paths:
         _check_path(raw_path)
+
+    # Strict structural gate on the raw stored/applied text: the marker checks
+    # above accept truncated hunks; validating stripped text would drop a
+    # trailing blank context line that the appliers still count.
+    # (declared counts unmet) that persist as Attempts and crash Phase 8.
+    # Re-raised as PatchFormatRejected so the normal format-retry regen path
+    # handles it; path violations above stay hard PatchRejected.
+    try:
+        validate_unified_diff(patch)
+    except InvalidUnifiedDiffError as exc:
+        raise PatchFormatRejected(
+            f"Patch is not a strictly valid unified diff: {exc}"
+        ) from exc
 
 
 def _check_path(raw_path: str) -> None:
@@ -700,8 +820,13 @@ async def _call_and_parse(
     response = await llm.complete(
         messages=messages,
         db=db,
-        max_tokens=10_000_000,
+        max_tokens=_FIX_MAX_TOKENS,
     )
+
+    truncation = _detect_truncation(response, _effective_max_tokens(_FIX_MAX_TOKENS))
+    if truncation is not None and _provider_reported_truncation(response):
+        # Provider verdict: cut payload, fail before any parse or persist.
+        _raise_truncated(truncation, attempt="first attempt")
 
     raw_content: str = response.get("content") or ""
     content: str = _strip_markdown_fences(raw_content)
@@ -717,6 +842,10 @@ async def _call_and_parse(
         fix_output = FixOutput.model_validate_json(content)
         return fix_output, response
     except ValidationError as first_err:
+        if truncation is not None:
+            # Inferred cut (reason-less, whole budget spent) confirmed by the
+            # parse failing — retrying the identical budget cuts identically.
+            _raise_truncated(truncation, attempt="first attempt")
         logger.warning(
             "fix_generator: run=%s first parse failed (%s) — retrying with error context",
             run_id,
@@ -736,8 +865,14 @@ async def _call_and_parse(
     retry_response = await llm.complete(
         messages=retry_messages,
         db=db,
-        max_tokens=10_000_000,
+        max_tokens=_FIX_MAX_TOKENS,
     )
+
+    retry_truncation = _detect_truncation(retry_response, _effective_max_tokens(_FIX_MAX_TOKENS))
+    if retry_truncation is not None and _provider_reported_truncation(
+        retry_response
+    ):
+        _raise_truncated(retry_truncation, attempt="retry")
 
     retry_raw_content: str = retry_response.get("content") or ""
     retry_content: str = _strip_markdown_fences(retry_raw_content)
@@ -765,6 +900,8 @@ async def _call_and_parse(
         retry_response = {**retry_response, "usage": combined_usage}
         return fix_output, retry_response
     except ValidationError as second_err:
+        if retry_truncation is not None:
+            _raise_truncated(retry_truncation, attempt="retry")
         raise FixGenerationError(
             f"LLM output failed schema validation on both attempts. "
             f"First error: {first_err_msg}. Second error: {second_err}."

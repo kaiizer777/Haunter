@@ -62,6 +62,8 @@ from typing import Any, Final, Iterable, NamedTuple, Optional
 
 import httpx
 
+from app.diff_validation import InvalidUnifiedDiffError, validate_unified_diff
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -538,14 +540,21 @@ def resolve_file_path(target_path: str, existing_paths: Iterable[str]) -> str:
     return target_path
 
 
-def _split_patch_by_file(patch_text: str) -> tuple[dict[str, str], list[str]]:
-    """
-    Split a multi-file unified diff into {file_path: file_patch_text} and deleted_paths.
+def _split_patch_by_file(patch_text: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Split a unified diff into ({path: file_patch}, {deleted_path: file_patch}).
+
+    Both values keep their ``---``/``+++`` headers ahead of the hunk bodies:
+    the fail-closed applier skips to the first ``@@``, and the gate reads the
+    ``---`` header to tell a true creation (``--- /dev/null``) from a patch
+    that merely targets a path missing from the tree. Deletion bodies are
+    captured (not dropped) so the gate can run the fail-closed applier over
+    the deleted file's ``-`` lines instead of counting the deletion blind.
     """
     file_patches: dict[str, list[str]] = {}
-    deleted_paths: list[str] = []
-    current_path: Optional[str] = None
+    deleted_patches: dict[str, list[str]] = {}
+    current: Optional[list[str]] = None
     old_path: Optional[str] = None
+    old_header: Optional[str] = None
 
     for line in patch_text.splitlines():
         if (line.startswith("---") or line.startswith("+++")) and _FILE_HEADER_RE.match(
@@ -556,23 +565,42 @@ def _split_patch_by_file(patch_text: str) -> tuple[dict[str, str], list[str]]:
             raw_path = m.group(1).strip()
             if line.startswith("---"):
                 old_path = raw_path
-                current_path = None
+                old_header = line.strip()
+                current = None
             elif line.startswith("+++"):
                 if raw_path == "/dev/null":
                     if old_path and old_path != "/dev/null":
-                        deleted_paths.append(old_path)
-                    current_path = None
+                        current = deleted_patches.setdefault(old_path, [])
+                        if old_header is not None:
+                            current.append(old_header)
+                        current.append(line.strip())
+                    else:
+                        current = None
                 else:
-                    current_path = raw_path
-                    if current_path not in file_patches:
-                        file_patches[current_path] = []
+                    current = file_patches.setdefault(raw_path, [])
+                    if old_header is not None:
+                        current.append(old_header)
+                    current.append(line.strip())
+                old_path = None
+                old_header = None
             continue
 
-        if current_path is not None:
-            file_patches[current_path].append(line)
+        if current is not None:
+            current.append(line)
 
-    result = {p: "\n".join(lines) for p, lines in file_patches.items()}
-    return result, deleted_paths
+    files_dict = {p: "\n".join(lines) for p, lines in file_patches.items()}
+    deleted_dict = {p: "\n".join(lines) for p, lines in deleted_patches.items()}
+    return files_dict, deleted_dict
+
+
+def _is_creation_patch(file_patch: str) -> bool:
+    """True when a per-file segment creates its file (old side is /dev/null)."""
+    for line in file_patch.splitlines():
+        if line.startswith("@@"):
+            return False
+        if line.startswith("---"):
+            return line.strip() == "--- /dev/null"
+    return False
 
 
 def apply_unified_diff(base_content: str, patch_text: str) -> str:
@@ -854,6 +882,105 @@ def _parse_patch_files(patch_text: str) -> dict[str, str]:
     return files
 
 
+def _exact_seed_path(raw_path: str, known_paths: Iterable[str]) -> Optional[str]:
+    """Strip one a-/b- prefix and match a mirrored tree path exactly.
+
+    No suffix/basename guessing: the PR dry-run fetches the patch's literal
+    path, so a guessed mirror path can verify-pass while dry-run rejects.
+    Returns the match, or None when the path is absent from the tree.
+    """
+    norm = raw_path.replace("\\", "/").strip()
+    if norm.startswith("a/") or norm.startswith("b/"):
+        norm = norm[2:]
+    known = set(known_paths)
+    return norm if norm in known else None
+
+
+def _fail_closed_push_gate(patch_text: str, base_files: dict[str, bytes]) -> None:
+    """Reject patches the PR dry-run would reject, before any tree write.
+
+    Runs strict structural validation plus the shared fail-closed applier
+    (app.github.pr) per file against the mirrored base content with exact
+    path resolution. Deletions run the applier over their captured ``-``
+    lines; paths missing from the tree pass only for true creations
+    (``--- /dev/null``). Raises ValueError on the first divergence, so
+    sandbox verify can never pass a patch commit_patch/dry-run refuses.
+
+    The legacy fuzzy applier below is unchanged: a patch passing this gate
+    always matches its tier-1 exact position, so the silent-drop and
+    strip-tier fallbacks are unreachable for gated content. The mirror
+    workflow file is not a valid patch target.
+
+    Seedless pushes (no mirrored tree) skip only the base-content matching:
+    structural validation still runs, and the push path below treats targets
+    as new files (#164 seedless-verify contract).
+    """
+    if not base_files:
+        try:
+            validate_unified_diff(patch_text)
+        except InvalidUnifiedDiffError as exc:
+            raise ValueError(
+                f"push_patch_to_mirror: patch is not a valid unified diff: {exc}"
+            ) from exc
+        return
+    from app.github.pr import _apply_unified_diff_to_content
+
+    try:
+        validate_unified_diff(patch_text)
+    except InvalidUnifiedDiffError as exc:
+        raise ValueError(
+            f"push_patch_to_mirror: patch is not a valid unified diff: {exc}"
+        ) from exc
+
+    split_files, split_deleted = _split_patch_by_file(patch_text)
+    applied = 0
+    for raw_path, file_patch in split_files.items():
+        exact = _exact_seed_path(raw_path, base_files.keys())
+        if exact is None:
+            if not _is_creation_patch(file_patch):
+                raise ValueError(
+                    f"push_patch_to_mirror: hunk for '{raw_path}' targets a "
+                    "path missing from the mirrored tree and is not a "
+                    "new-file creation (--- /dev/null) — refusing a "
+                    "verify-pass that PR dry-run would reject"
+                )
+            base_text = ""
+            target_label = raw_path
+        else:
+            try:
+                base_text = base_files[exact].decode("utf-8")
+            except UnicodeDecodeError:
+                base_text = base_files[exact].decode("utf-8", errors="replace")
+            target_label = exact
+        if _apply_unified_diff_to_content(base_text, file_patch) is None:
+            raise ValueError(
+                f"push_patch_to_mirror: hunk for '{target_label}' does not apply "
+                "to the mirrored tree (fail-closed check) — refusing a "
+                "verify-pass that PR dry-run would reject"
+            )
+        applied += 1
+    for del_path, del_patch in split_deleted.items():
+        exact = _exact_seed_path(del_path, base_files.keys())
+        if exact is None:
+            continue
+        try:
+            base_text = base_files[exact].decode("utf-8")
+        except UnicodeDecodeError:
+            base_text = base_files[exact].decode("utf-8", errors="replace")
+        if _apply_unified_diff_to_content(base_text, del_patch) is None:
+            raise ValueError(
+                f"push_patch_to_mirror: deletion of '{exact}' does not apply "
+                "to the mirrored tree (fail-closed check) — refusing a "
+                "verify-pass that PR dry-run would reject"
+            )
+        applied += 1
+    if applied == 0:
+        raise ValueError(
+            "push_patch_to_mirror: patch produces no file changes against the "
+            "mirrored tree — PR dry-run would reject it"
+        )
+
+
 async def push_patch_to_mirror(
     gh: httpx.AsyncClient,
     repo_full: str,
@@ -913,6 +1040,11 @@ async def push_patch_to_mirror(
                 f"push_patch_to_mirror: patch size exceeds MVP limit "
                 f"({_MAX_PATCH_BYTES} bytes); Contents-API fallback is future work"
             )
+
+        # Fail-closed gate (#281): reject here — before any blob/tree write —
+        # patches the fail-closed PR applier would refuse, so a verify-pass
+        # guarantees a dry-run-pass on the same base content.
+        _fail_closed_push_gate(patch_text, dict(seed_files) if seed_files else {})
     else:
         if not seed_files and not (workflow_filename and workflow_content):
             raise ValueError(
