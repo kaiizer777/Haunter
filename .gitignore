@@ -11,6 +11,9 @@ yarn-error.log*
 # Local dev runtime logs (backend/server.log, backend/server_err.log, etc.)
 *.log
 
+# Runtime audit dossier (cwd-relative; written by tests and local runs)
+.haunter-dossier/
+
 # Python & FastAPI
 __pycache__/
 *.py[cod]

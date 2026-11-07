@@ -36,6 +36,8 @@ from app.orchestrator import (
     _validate_transition,
     check_fast_fail,
     handle_failed_run,
+    is_non_retryable_failure,
+    record_verification_failure,
 )
 from app.subagents.context_gatherer import _redact_secrets, _truncate_and_redact
 from tests.conftest import truncate_all
@@ -1038,6 +1040,57 @@ def test_fast_fail_does_not_trigger_on_repeated_context_gatherer_failure(
     assert reason == "non_llm_repeat"
     log_messages = [r.getMessage() for r in caplog.records]
     assert not any("fast-failing" in m for m in log_messages)
+
+
+def test_is_non_retryable_failure_marks_prefixed_mirror_refusal() -> None:
+    """A fail-closed mirror refusal aborts the retry loop (issue #288)."""
+    assert (
+        is_non_retryable_failure(
+            "[non-retryable] push_patch_to_mirror: hunk for 'README.md' "
+            "does not apply to the mirrored tree (fail-closed check)"
+        )
+        is True
+    )
+
+
+def test_is_non_retryable_failure_ignores_retryable_sandbox_error() -> None:
+    """Ordinary sandbox failures keep retrying."""
+    assert (
+        is_non_retryable_failure(
+            "Workflow run concluded 'failure': AssertionError in tests/test_foo.py"
+        )
+        is False
+    )
+
+
+def test_is_non_retryable_failure_handles_empty_reason() -> None:
+    """None and empty reasons are retryable (no prefix to honor)."""
+    assert is_non_retryable_failure(None) is False
+    assert is_non_retryable_failure("") is False
+
+
+def test_record_verification_failure_aborts_on_non_retryable() -> None:
+    """Prefixed refusal records both decisions and returns non_retryable."""
+    decisions: list[str] = []
+    reason = record_verification_failure(
+        decisions=decisions,
+        failure_reason="[non-retryable] GitHub Actions sandbox: quota exhausted",
+        attempt_number=2,
+    )
+    assert reason == "non_retryable"
+    assert decisions == ["verification_failed_attempt_2", "non_retryable_abort_attempt_2"]
+
+
+def test_record_verification_failure_retries_ordinary_error() -> None:
+    """Ordinary failure records only the attempt and returns None."""
+    decisions: list[str] = []
+    reason = record_verification_failure(
+        decisions=decisions,
+        failure_reason="Workflow run concluded 'failure': AssertionError in tests/test_foo.py",
+        attempt_number=1,
+    )
+    assert reason is None
+    assert decisions == ["verification_failed_attempt_1"]
 
 # ---------------------------------------------------------------------------
 # Pipeline concurrency cap (feat-251, issue #256)

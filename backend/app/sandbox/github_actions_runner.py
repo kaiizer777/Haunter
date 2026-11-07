@@ -86,6 +86,11 @@ _GITHUB_API_BASE: str = "https://api.github.com"
 _API_TIMEOUT_SECONDS: float = 30.0
 _PEM_LOAD_TIMEOUT_SECONDS: float = 10.0
 
+# Retry policy for the SSM cold-start read (issue #286). A slow SSM read is
+# retryable infrastructure flakiness, not a bad patch. Non-timeout errors
+# (missing parameter, access denied) fail fast — retrying those cannot heal.
+_PEM_LOAD_MAX_ATTEMPTS: int = 3
+
 # Token cache: GitHub installation tokens are 1h; we refresh
 # conservatively 5 min before expiry.
 _TOKEN_REFRESH_MARGIN_SECONDS: int = 5 * 60
@@ -190,28 +195,49 @@ async def _load_pem_from_ssm(ssm_path: str) -> str:
         resp = client.get_parameter(Name=ssm_path, WithDecryption=True)
         return resp["Parameter"]["Value"]
 
-    try:
-        pem = await asyncio.wait_for(
-            asyncio.to_thread(_sync_load),
-            timeout=_PEM_LOAD_TIMEOUT_SECONDS,
+    # Cold-start retry (issue #286): the blocking boto3 call runs via
+    # to_thread, so only a slow SSM read trips the wait_for timeout. Retry
+    # timeouts with backoff; fail fast on any other error. The PEM itself
+    # is never logged — only the cache path and byte length below.
+    attempt_no = 0
+    while True:
+        attempt_no += 1
+        try:
+            pem = await asyncio.wait_for(
+                asyncio.to_thread(_sync_load),
+                timeout=_PEM_LOAD_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            if attempt_no >= _PEM_LOAD_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"SSM get_parameter timed out after {_PEM_LOAD_TIMEOUT_SECONDS}s "
+                    f"(path={ssm_path})"
+                ) from None
+            delay = min(
+                _RETRY_BACKOFF_BASE_SECONDS * (2.0 ** (attempt_no - 1)),
+                _RETRY_BACKOFF_CAP_SECONDS,
+            )
+            logger.warning(
+                "github_actions_runner: SSM get_parameter timed out "
+                "(path=%s, attempt=%d/%d) — retrying in %.1fs",
+                ssm_path,
+                attempt_no,
+                _PEM_LOAD_MAX_ATTEMPTS,
+                delay,
+            )
+            await asyncio.sleep(delay)
+            continue
+        except Exception as exc:
+            raise RuntimeError(
+                f"SSM get_parameter failed (path={ssm_path}): {exc}"
+            ) from exc
+        _PEM_CACHE[ssm_path] = pem
+        logger.info(
+            "github_actions_runner: loaded PEM from SSM (path=%s, len=%d)",
+            ssm_path,
+            len(pem),
         )
-    except asyncio.TimeoutError:
-        raise RuntimeError(
-            f"SSM get_parameter timed out after {_PEM_LOAD_TIMEOUT_SECONDS}s "
-            f"(path={ssm_path})"
-        ) from None
-    except Exception as exc:
-        raise RuntimeError(
-            f"SSM get_parameter failed (path={ssm_path}): {exc}"
-        ) from exc
-
-    _PEM_CACHE[ssm_path] = pem
-    logger.info(
-        "github_actions_runner: loaded PEM from SSM (path=%s, len=%d)",
-        ssm_path,
-        len(pem),
-    )
-    return pem
+        return pem
 
 
 async def mint_installation_token(
@@ -791,6 +817,77 @@ async def _seed_test_mirror_with_user_tree(
 # ---------------------------------------------------------------------------
 
 
+async def _refresh_seed_with_fresh_context(
+    *,
+    client: httpx.AsyncClient,
+    user_repo_full: str,
+    head_sha: str,
+    token: str,
+    fallback_token: Optional[str],
+    seed_files: dict[str, bytes],
+    patch_text: str,
+) -> dict[str, bytes]:
+    """Overlay fresh Contents-API bytes onto the tarball seed for patch targets.
+
+    The fail-closed mirror gate compares patch context against ``seed_files``.
+    The tarball seed can pin stale bytes for a file the patch targets, so a
+    hunk authored against fresh context fail-closes on content the patch
+    never saw (issue #287). Re-fetch each touched path at ``head_sha`` via
+    the Contents API — the same source ``dry_run_patch_at_sha`` reads — and
+    overlay the fresh bytes before the gate runs.
+
+    Fail-soft by design: any fetch problem keeps the tarball bytes and the
+    gate stays exactly as strict as before. The applier itself is untouched.
+    """
+    import base64 as _base64
+    from urllib.parse import quote as _quote
+
+    if not patch_text or not patch_text.strip() or not seed_files:
+        return seed_files
+    fresh = dict(seed_files)
+    refreshed = 0
+    touched = 0
+    for path in _extract_file_paths_from_patch(patch_text):
+        if path not in fresh:
+            continue  # creations and seed-missing paths stay with gate logic
+        touched += 1
+        url = (
+            f"{_GITHUB_API_BASE}/repos/{user_repo_full}"
+            f"/contents/{_quote(path, safe='/')}"
+        )
+        params = {"ref": head_sha}
+        try:
+            resp = await client.get(
+                url, headers=_auth_headers(token), params=params
+            )
+            if (
+                resp.status_code == 403
+                and fallback_token
+                and fallback_token != token
+            ):
+                resp = await client.get(
+                    url, headers=_auth_headers(fallback_token), params=params
+                )
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if not isinstance(data, dict) or not data.get("content"):
+                continue  # directory listing or empty — keep tarball bytes
+            fresh[path] = _base64.b64decode("".join(str(data["content"]).split()))
+            refreshed += 1
+        except Exception:
+            continue  # keep tarball bytes; gate stays fail-closed
+    logger.info(
+        "github_actions_runner: refreshed %d/%d seed file(s) with fresh "
+        "context from %s @ %s",
+        refreshed,
+        touched,
+        user_repo_full,
+        head_sha[:12] if head_sha else "?",
+    )
+    return fresh
+
+
 def _extract_file_paths_from_patch(patch_text: str) -> list[str]:
     """
     Extract touched file paths from a unified diff (fallback when
@@ -1204,6 +1301,19 @@ class GitHubActionsSandboxRunner(SandboxRunner):
                                 len(seed_files),
                                 user_repo_full,
                                 inp.head_sha[:12],
+                            )
+                            # Fresh-context overlay (issue #287): re-fetch each
+                            # patch target at head_sha so the fail-closed gate
+                            # compares against current bytes, not stale tarball
+                            # bytes. Fail-soft — keeps tarball bytes on error.
+                            seed_files = await _refresh_seed_with_fresh_context(
+                                client=client,
+                                user_repo_full=user_repo_full,
+                                head_sha=inp.head_sha,
+                                token=used_token,
+                                fallback_token=fallback_token,
+                                seed_files=seed_files,
+                                patch_text=inp.patch,
                             )
                         except Exception as exc:
                             logger.warning(
